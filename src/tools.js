@@ -1,0 +1,116 @@
+// MCP tool surface. Every handler's output passes through the scrubber before it leaves.
+import { z } from 'zod';
+import { scrub, scrubDeep } from './scrub.js';
+import { cloneProject, listAvailableRepos } from './clone.js';
+
+function ok(data, text) {
+  const payload = scrubDeep(data);
+  return {
+    content: [{ type: 'text', text: scrub(text ?? JSON.stringify(payload, null, 2)) }],
+    structuredContent: typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? payload : { result: payload },
+  };
+}
+function fail(err) {
+  const msg = scrub(err?.message || String(err));
+  return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true };
+}
+const wrap = fn => async args => { try { return await fn(args ?? {}); } catch (e) { return fail(e); } };
+
+export function registerTools(server, { cfg, projects, jobs, log }) {
+  server.registerTool('list_projects', {
+    title: 'List projects',
+    description: `Rescan the workspace root (${cfg.workspace_root}) and list every git repository in it: name, current branch, default branch, remote (credentials stripped), whether the working tree is dirty, whether a .claude setup exists (CLAUDE.md / .claude/preflight.md / .claude/agents) and which agents it exposes. Results are cached and refreshed on every call.`,
+    inputSchema: {
+      filter: z.string().optional().describe('Case-insensitive substring to match against project names'),
+      with_status: z.boolean().optional().describe('Include dirty-tree status (default true; slower on many repos)'),
+    },
+  }, wrap(async ({ filter }) => {
+    const list = await projects.list({ refresh: true });
+    const out = filter ? list.filter(p => p.name.toLowerCase().includes(filter.toLowerCase())) : list;
+    return ok({ workspace_root: cfg.workspace_root, count: out.length, projects: out });
+  }));
+
+  server.registerTool('clone_project', {
+    title: 'Clone a repository into the workspace',
+    description: `Clone a repo into ${cfg.workspace_root}/<name> using the machine's stored git credentials. Pass either url (https://, ssh:// or git@host:owner/repo) or repo ("owner/repo" on a configured host). Never overwrites: if <name> already exists its path is returned and nothing is touched. Shallow by default (depth ${cfg.clone.depth}); pass full_history=true for everything. Refuses names with separators, traversal or leading dots, and refuses non-https/ssh sources.`,
+    inputSchema: {
+      url: z.string().optional().describe('Clone URL (https://host/owner/repo, ssh://git@host/owner/repo, git@host:owner/repo.git)'),
+      repo: z.string().optional().describe('Shorthand owner/repo; combined with host (defaults to the first configured host)'),
+      host: z.string().optional().describe('Host for the owner/repo shorthand, e.g. github.com'),
+      name: z.string().optional().describe('Local directory name (defaults to the repo name)'),
+      branch: z.string().optional().describe('Branch to check out'),
+      depth: z.number().int().min(0).optional().describe('Shallow clone depth; 0 = full history'),
+      full_history: z.boolean().optional().describe('Clone full history (same as depth 0)'),
+    },
+  }, wrap(async args => {
+    const r = await cloneProject(cfg, args);
+    projects.invalidate();
+    if (r.status === 'cloned') await projects.scan().catch(() => {});
+    return ok(r, r.message || `${r.status}: ${r.name} at ${r.path}${r.branch ? ` (branch ${r.branch})` : ''}`);
+  }));
+
+  server.registerTool('list_available_repos', {
+    title: 'List repos visible to the stored credentials',
+    description: `List repositories the stored credentials can see on the configured hosts (${(cfg.clone.hosts || []).map(h => h.host).join(', ') || 'none configured'}), so a caller can pick one to clone. Marks repos already present locally.`,
+    inputSchema: {
+      host: z.string().optional().describe('Limit to one configured host'),
+      query: z.string().optional().describe('Case-insensitive substring match on full name / description'),
+      limit: z.number().int().min(1).max(500).optional().describe('Max repos to return (default 100)'),
+    },
+  }, wrap(async args => ok(await listAvailableRepos(cfg, args))));
+
+  server.registerTool('start_task', {
+    title: 'Start a Claude Code task',
+    description: `Dispatch a natural-language task to Claude Code (headless) in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Refused if the working tree is dirty or the project already has an active job. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}).`,
+    inputSchema: {
+      project: z.string().describe('Project name as shown by list_projects'),
+      prompt: z.string().describe('What to do, in natural language'),
+      mode: z.enum(['plan', 'execute']).optional().describe('plan (default, read-only) or execute'),
+      agent: z.string().optional().describe('Name of a project agent from .claude/agents to run as'),
+      base_branch: z.string().optional().describe('Branch to start from (defaults to the project default branch)'),
+      max_cost_usd: z.number().positive().optional().describe('Override the cost ceiling for this job'),
+      timeout_minutes: z.number().positive().max(180).optional().describe('Override the hard timeout for this job'),
+    },
+  }, wrap(async args => {
+    const r = await jobs.start(args);
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}). Poll get_task_status with this job_id.`);
+  }));
+
+  server.registerTool('get_task_status', {
+    title: 'Get task status',
+    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, cost/usage, and the final result or plan text when finished.',
+    inputSchema: { job_id: z.string() },
+  }, wrap(async ({ job_id }) => ok(jobs.status(job_id))));
+
+  server.registerTool('get_task_log', {
+    title: 'Get task log',
+    description: 'Human-readable transcript for a job (secrets scrubbed). Use offset/next_offset for incremental polling. raw=true returns the underlying stream-json events instead.',
+    inputSchema: {
+      job_id: z.string(),
+      offset: z.number().int().min(0).optional().describe('Byte offset to read from (use next_offset from the previous call)'),
+      limit: z.number().int().min(1).max(200000).optional().describe('Max bytes to return (default 16384)'),
+      raw: z.boolean().optional().describe('Return raw stream-json lines instead of the transcript'),
+    },
+  }, wrap(async args => {
+    const r = jobs.readLog(args.job_id, args);
+    return ok(r, r.text || (r.eof ? '(empty log)' : '(nothing new yet)'));
+  }));
+
+  server.registerTool('cancel_task', {
+    title: 'Cancel a task',
+    description: 'Terminate a queued or running job. By default discards uncommitted agent changes, restores the original branch and deletes the job branch so nothing is orphaned; pass keep_branch=true to commit partial work and keep the branch instead.',
+    inputSchema: { job_id: z.string(), keep_branch: z.boolean().optional() },
+  }, wrap(async args => ok(await jobs.cancel(args.job_id, args))));
+
+  server.registerTool('list_jobs', {
+    title: 'List recent jobs',
+    description: 'Recent jobs with state, project and a one-line summary. Filter by project or state.',
+    inputSchema: {
+      limit: z.number().int().min(1).max(200).optional(),
+      project: z.string().optional(),
+      state: z.enum(['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted']).optional(),
+    },
+  }, wrap(async args => ok({ jobs: jobs.list(args) })));
+
+  log.info('tools registered: list_projects, clone_project, list_available_repos, start_task, get_task_status, get_task_log, cancel_task, list_jobs');
+}

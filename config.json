@@ -1,0 +1,41 @@
+{
+  "workspace_root": "~/code",
+  "data_dir": "~/.local/share/claude-code-bridge",
+  "server": {
+    "host": "0.0.0.0",
+    "port": 4010,
+    "token_file": "~/.config/claude-code-bridge/token"
+  },
+  "discovery": {
+    "depth": 1,
+    "exclusions": ["node_modules", "claude-code-bridge"]
+  },
+  "limits": {
+    "max_concurrent_jobs": 2,
+    "job_timeout_minutes": 20,
+    "max_cost_usd": 5,
+    "list_jobs_max": 50
+  },
+  "clone": {
+    "depth": 1,
+    "timeout_seconds": 600,
+    "max_size_mb": 2048,
+    "hosts": [
+      { "host": "github.com", "type": "github" },
+      { "host": "git.gnrl.tech", "type": "gitea" }
+    ]
+  },
+  "claude": {
+    "bin": "claude",
+    "model": null,
+    "extra_args": [],
+    "branch_prefix": "bridge/",
+    "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
+  },
+  "projects": {
+    "form-submissions": {
+      "job_timeout_minutes": 30,
+      "max_cost_usd": 8
+    }
+  }
+}

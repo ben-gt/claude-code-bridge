@@ -1,0 +1,56 @@
+{
+  "_comment": "Copy to config.json (or config.local.json for machine-local tweaks, which is gitignored and merged on top). Every key is optional; defaults live in src/config.js.",
+
+  "workspace_root": "~/code",
+  "data_dir": "~/.local/share/claude-code-bridge",
+
+  "server": {
+    "host": "0.0.0.0",
+    "port": 4010,
+    "token_file": "~/.config/claude-code-bridge/token"
+  },
+
+  "discovery": {
+    "_comment": "depth 1 = direct children of workspace_root. Raise it if you nest by owner (~/code/<owner>/<repo>). Directory names in exclusions are skipped at any depth; names starting with '.' are always skipped.",
+    "depth": 1,
+    "exclusions": ["node_modules", "claude-code-bridge", "archive"]
+  },
+
+  "limits": {
+    "max_concurrent_jobs": 2,
+    "job_timeout_minutes": 20,
+    "max_cost_usd": 5,
+    "list_jobs_max": 50
+  },
+
+  "clone": {
+    "_comment": "hosts: which git hosts list_available_repos / draft-PR creation talk to. Credentials come from `git credential fill` (your git credential helper) — never from this file. type: github | gitea | gitlab. api_base overrides the default API URL.",
+    "depth": 1,
+    "timeout_seconds": 600,
+    "max_size_mb": 2048,
+    "hosts": [
+      { "host": "github.com", "type": "github" },
+      { "host": "git.example.com", "type": "gitea" },
+      { "host": "gitlab.example.com", "type": "gitlab", "api_base": "https://gitlab.example.com/api/v4" }
+    ]
+  },
+
+  "claude": {
+    "_comment": "bin: claude executable (PATH or absolute). model: alias passed as --model, null = CLI default. extra_args: appended verbatim to every invocation.",
+    "bin": "claude",
+    "model": null,
+    "extra_args": ["--effort", "high"],
+    "branch_prefix": "bridge/",
+    "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
+  },
+
+  "projects": {
+    "_comment": "Per-project overrides keyed by directory name. default_branch: use when it can't be inferred. allow_untracked: don't count untracked files as a dirty tree.",
+    "my-app": {
+      "default_branch": "develop",
+      "job_timeout_minutes": 40,
+      "max_cost_usd": 10,
+      "allow_untracked": true
+    }
+  }
+}

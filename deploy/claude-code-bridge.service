@@ -1,0 +1,26 @@
+[Unit]
+Description=Claude Code Bridge (MCP server exposing Claude Code headless for ~/code)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/code/claude-code-bridge
+# nvm-managed node; keep PATH explicit so `claude` and `node` resolve under systemd.
+Environment=PATH=/root/.nvm/versions/node/v22.14.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
+Environment=NODE_ENV=production
+ExecStart=/root/.nvm/versions/node/v22.14.0/bin/node src/index.js
+Restart=always
+RestartSec=3
+# Kill the whole cgroup on stop/restart so Claude children don't outlive the server;
+# they are then reported as `interrupted` on the next start.
+KillMode=control-group
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-code-bridge
+
+[Install]
+WantedBy=multi-user.target
