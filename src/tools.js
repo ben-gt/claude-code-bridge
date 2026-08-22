@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import { scrub, scrubDeep } from './scrub.js';
 import { cloneProject, listAvailableRepos } from './clone.js';
+import { resolveComposeTarget, composeStatus, composeLogs, compose, validateServices, composeConfig, isProtected, protectedList } from './compose.js';
 
 function ok(data, text) {
   const payload = scrubDeep(data);
@@ -68,12 +69,15 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       mode: z.enum(['plan', 'execute']).optional().describe('plan (default, read-only) or execute'),
       agent: z.string().optional().describe('Name of a project agent from .claude/agents to run as'),
       base_branch: z.string().optional().describe('Branch to start from (defaults to the project default branch)'),
-      max_cost_usd: z.number().positive().optional().describe('Override the cost ceiling for this job'),
+      max_cost_usd: z.number().positive().optional().describe('Override the cost ceiling for this job (default is per model tier)'),
       timeout_minutes: z.number().positive().max(180).optional().describe('Override the hard timeout for this job'),
+      model: z.string().optional().describe(`Override model selection: a tier name (${Object.keys(cfg.models?.tiers || {}).join(', ')}), a configured model id/alias, or any model string. Omit to let the bridge choose (default tier unless an escalation trigger fires). Always honoured, up or down.`),
+      complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier'),
+      retry_of: z.string().optional().describe('job_id of a previous failed attempt; retries escalate automatically'),
     },
   }, wrap(async args => {
     const r = await jobs.start(args);
-    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}). Poll get_task_status with this job_id.`);
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}). Poll get_task_status with this job_id.`);
   }));
 
   server.registerTool('get_task_status', {
@@ -104,13 +108,75 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
 
   server.registerTool('list_jobs', {
     title: 'List recent jobs',
-    description: 'Recent jobs with state, project and a one-line summary. Filter by project or state.',
+    description: 'Recent jobs (Claude Code tasks and compose redeploys) with state, project, model and a one-line summary. Filter by project or state.',
     inputSchema: {
       limit: z.number().int().min(1).max(200).optional(),
       project: z.string().optional(),
       state: z.enum(['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted']).optional(),
     },
   }, wrap(async args => ok({ jobs: jobs.list(args) })));
+
+  // ---------------- Docker Compose ----------------
+  const composeArgs = {
+    project: z.string().describe('Project name as shown by list_projects'),
+    file: z.string().optional().describe('Compose file (relative to the project) — required when the project has more than one'),
+    services: z.array(z.string()).optional().describe('Limit to these services'),
+    profile: z.string().optional().describe('Compose profile to enable'),
+  };
+  const protectedNote = `Protected stacks (refused): ${protectedList(cfg).join(', ')}.`;
+  const statusText = list => list.length ? list.map(c => `${c.service}: ${c.state}${c.health ? ` (${c.health})` : ''} — ${c.status}${c.ports.length ? ` [${c.ports.join(', ')}]` : ''}`).join('\n') : '(no containers)';
+
+  server.registerTool('compose_status', {
+    title: 'Compose status',
+    description: `docker compose ps for a project under ${cfg.workspace_root}: services, state, health, ports, uptime. Read-only.`,
+    inputSchema: composeArgs,
+  }, wrap(async ({ project, file, services, profile }) => {
+    const target = resolveComposeTarget(cfg, project, { file, profile });
+    const svc = validateServices(services);
+    const list = await composeStatus(target, svc);
+    return ok({ project: target.project, files: target.files, protected: !!target.protectedBy, services: list }, statusText(list));
+  }));
+
+  server.registerTool('compose_logs', {
+    title: 'Compose logs',
+    description: 'Tail container logs for a project (scrubbed for secrets). Args: services, lines (default 200, max 5000), since (e.g. 10m, 2h, ISO timestamp). Read-only.',
+    inputSchema: { ...composeArgs, lines: z.number().int().min(1).max(5000).optional(), since: z.string().optional() },
+  }, wrap(async ({ project, file, services, profile, lines, since }) => {
+    const target = resolveComposeTarget(cfg, project, { file, profile });
+    const text = await composeLogs(target, { services: validateServices(services), lines: lines ?? cfg.compose?.logs_default_lines ?? 200, since });
+    return ok({ project: target.project, files: target.files, text }, text || '(no log output)');
+  }));
+
+  const syncOp = (verb, subArgs, timeoutMs) => async ({ project, file, services, profile }) => {
+    const target = resolveComposeTarget(cfg, project, { file, profile });
+    if (target.protectedBy) throw new Error(`refused: ${target.protectedBy}. Use a terminal on the box for this stack.`);
+    const svc = validateServices(services);
+    return jobs.withComposeLock(target.project, `compose ${verb}`, async () => {
+      const info = await composeConfig(target);
+      const prot = isProtected(cfg, target.project, info.name);
+      if (prot) throw new Error(`refused: ${prot}. Use a terminal on the box for this stack.`);
+      const before = await composeStatus(target, svc);
+      const r = await compose(target, [...subArgs, ...svc], { timeoutMs });
+      const after = await composeStatus(target, svc);
+      const output = (r.stdout + '\n' + r.stderr).trim();
+      const result = { project: target.project, compose_project: info.name, files: target.files, ok: r.code === 0, exit_code: r.code, before, after, output: output.slice(-4000) };
+      if (r.code !== 0) return { ...fail(new Error(`docker compose ${verb} failed (exit ${r.code}): ${output.split('\n').slice(-3).join(' | ')}`)), structuredContent: scrubDeep(result) };
+      return ok(result, `compose ${verb} ok on ${target.project}\nbefore:\n${statusText(before)}\nafter:\n${statusText(after)}`);
+    });
+  };
+  const restartTimeout = (cfg.compose?.restart_timeout_seconds ?? 180) * 1000;
+  server.registerTool('compose_restart', { title: 'Compose restart', description: `Restart running services (docker compose restart). No rebuild, no pull. Returns service state before and after. ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('restart', ['restart'], restartTimeout)));
+  server.registerTool('compose_stop', { title: 'Compose stop', description: `Stop services (docker compose stop — containers are kept, nothing is removed). ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('stop', ['stop'], restartTimeout)));
+  server.registerTool('compose_up', { title: 'Compose up', description: `Start services (docker compose up -d --no-build; use compose_redeploy to pull/build). ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('up', ['up', '-d', '--no-build'], restartTimeout)));
+
+  server.registerTool('compose_redeploy', {
+    title: 'Compose redeploy (async)',
+    description: `pull (for image services), build (for services with a build section; optional no_cache) then up -d. Returns a job_id immediately; follow with get_task_status (steps + service state before/after) and get_task_log. Hard timeout ${cfg.compose?.redeploy_timeout_minutes ?? 15} min — a timeout reports the step it died in and the resulting state. Never removes volumes, never prunes; --remove-orphans only if remove_orphans=true. ${protectedNote}`,
+    inputSchema: { ...composeArgs, no_cache: z.boolean().optional(), remove_orphans: z.boolean().optional(), timeout_minutes: z.number().positive().max(120).optional() },
+  }, wrap(async args => {
+    const r = await jobs.startComposeRedeploy(args);
+    return ok(r, `compose redeploy job ${r.job_id} queued for ${r.project} (${r.files.join(', ')}). Poll get_task_status.`);
+  }));
 
   log.info('tools registered: list_projects, clone_project, list_available_repos, start_task, get_task_status, get_task_log, cancel_task, list_jobs');
 }

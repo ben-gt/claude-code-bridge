@@ -44,8 +44,6 @@ export const DEFAULTS = {
   claude: {
     // Command used to invoke Claude Code. Resolved via PATH unless absolute.
     bin: 'claude',
-    // Model alias passed as --model; null = whatever the CLI defaults to.
-    model: null,
     // Extra args appended verbatim (e.g. ["--effort","high"]).
     extra_args: [],
     // Branch prefix for execute-mode jobs.
@@ -53,9 +51,35 @@ export const DEFAULTS = {
     // Commit author used for any leftover-work commit the bridge makes itself.
     commit_author: 'Claude Code Bridge <claude-code-bridge@localhost>',
   },
+  // Model tiers. Names are policy; ids were confirmed against Claude Code 2.1.240
+  // (`--model opus` -> claude-opus-5, `--model fable` -> claude-fable-5). Change here, not in code.
+  models: {
+    default_tier: 'default',
+    complex_tier: 'complex',
+    tiers: {
+      default: { model: 'claude-opus-5', max_cost_usd: 5, aliases: ['opus'] },
+      complex: { model: 'claude-fable-5', max_cost_usd: 12, aliases: ['fable'] },
+    },
+    // Crude, explainable escalation triggers — expected to be tuned.
+    escalation: {
+      complex_agents: [],          // agent names that always run on the complex tier
+      prompt_length_chars: 2500,   // longer prompts escalate
+      file_references: 6,          // prompts naming more files than this escalate
+      plan_without_claude_setup: true,
+      retry_after_failure: true,
+    },
+  },
+  compose: {
+    // Compose projects (directory name OR compose project name) the bridge refuses to touch.
+    // The stack that serves the chat UI and the other MCP servers on this box are protected by default.
+    protected: ['openui', 'form-submissions', 'dms-v3-form-submissions', 'claude-code-bridge'],
+    redeploy_timeout_minutes: 15,
+    restart_timeout_seconds: 180,
+    logs_default_lines: 200,
+  },
   // Per-project overrides keyed by directory name. All keys optional.
   // Example: "my-app": { "default_branch": "develop", "job_timeout_minutes": 40,
-  //                      "max_cost_usd": 10, "allow_untracked": true }
+  //                      "max_cost_usd": 10, "allow_untracked": true, "tier": "complex" }
   projects: {},
 };
 

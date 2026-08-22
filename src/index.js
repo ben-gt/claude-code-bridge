@@ -11,6 +11,7 @@ import { JobManager } from './jobs.js';
 import { registerTools } from './tools.js';
 import { addSecret, scrub } from './scrub.js';
 import { cleanCloneTemp } from './clone.js';
+import { detectSelfComposeProject, dockerAvailable, protectedList } from './compose.js';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
 
@@ -52,6 +53,10 @@ async function main() {
   const jobs = new JobManager(cfg, projects, { log });
   jobs.init();
   cleanCloneTemp(cfg);
+  const self = await detectSelfComposeProject();
+  const composeVer = await dockerAvailable();
+  log.info(`docker compose: ${composeVer ? `v${composeVer}` : 'NOT AVAILABLE (compose tools will fail)'}; protected stacks: ${protectedList(cfg).join(', ')}${self ? ` (self: ${self})` : ''}`);
+  log.info(`model tiers: ${Object.entries(cfg.models?.tiers || {}).map(([k, v]) => `${k}=${v.model} ($${v.max_cost_usd})`).join(', ')}`);
   projects.scan().then(p => log.info(`discovered ${p.length} project(s) under ${cfg.workspace_root}`)).catch(e => log.error(`initial scan failed: ${e.message}`));
 
   const app = express();

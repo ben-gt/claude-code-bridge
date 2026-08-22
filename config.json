@@ -8,7 +8,10 @@
   },
   "discovery": {
     "depth": 1,
-    "exclusions": ["node_modules", "claude-code-bridge"]
+    "exclusions": [
+      "node_modules",
+      "claude-code-bridge"
+    ]
   },
   "limits": {
     "max_concurrent_jobs": 2,
@@ -21,13 +24,18 @@
     "timeout_seconds": 600,
     "max_size_mb": 2048,
     "hosts": [
-      { "host": "github.com", "type": "github" },
-      { "host": "git.gnrl.tech", "type": "gitea" }
+      {
+        "host": "github.com",
+        "type": "github"
+      },
+      {
+        "host": "git.gnrl.tech",
+        "type": "gitea"
+      }
     ]
   },
   "claude": {
     "bin": "claude",
-    "model": null,
     "extra_args": [],
     "branch_prefix": "bridge/",
     "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
@@ -35,7 +43,49 @@
   "projects": {
     "form-submissions": {
       "job_timeout_minutes": 30,
-      "max_cost_usd": 8
+      "max_cost_usd": 8,
+      "tier": "default"
     }
+  },
+  "models": {
+    "default_tier": "default",
+    "complex_tier": "complex",
+    "tiers": {
+      "default": {
+        "model": "claude-opus-5",
+        "max_cost_usd": 5,
+        "aliases": [
+          "opus"
+        ]
+      },
+      "complex": {
+        "model": "claude-fable-5",
+        "max_cost_usd": 12,
+        "aliases": [
+          "fable"
+        ]
+      }
+    },
+    "escalation": {
+      "complex_agents": [
+        "system-architect",
+        "product-intent-guardian"
+      ],
+      "prompt_length_chars": 2500,
+      "file_references": 6,
+      "plan_without_claude_setup": true,
+      "retry_after_failure": true
+    }
+  },
+  "compose": {
+    "protected": [
+      "openui",
+      "form-submissions",
+      "dms-v3-form-submissions",
+      "claude-code-bridge"
+    ],
+    "redeploy_timeout_minutes": 15,
+    "restart_timeout_seconds": 180,
+    "logs_default_lines": 200
   }
 }

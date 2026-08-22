@@ -33,10 +33,12 @@ const RULES = [
   // Authorization headers
   [/(Authorization\s*:\s*)(Bearer|Basic|Token|token)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, '$1$2 <redacted>'],
   [/\b(Bearer)\s+[A-Za-z0-9._~+\/=-]{20,}/g, '$1 <redacted>'],
-  // env-file style: SOME_API_KEY=value, export DB_PASSWORD="..."  (also YAML/JSON-ish `KEY: value`)
-  [/^(\s*(?:export\s+)?["']?)([A-Za-z_][A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|PRIVATE|SIGNING|CLIENT_ID|ACCESS_ID)[A-Za-z0-9_]*["']?)(\s*[=:]\s*)(?!<redacted)\S.*$/gim, '$1$2$3<redacted>'],
-  // JSON-ish "token": "value"
-  [/("(?:[A-Za-z_]*(?:api[_-]?key|apikey|secret|token|password|passwd|authorization|access[_-]?key|private[_-]?key)[A-Za-z_]*)"\s*:\s*")(?!<redacted)[^"]{4,}(")/gi, '$1<redacted>$2'],
+  // Secret-ish keys with QUOTED values (JSON / YAML / shell): keep the quoting so structure stays valid.
+  [/((?:["']?)(?:[A-Za-z_][A-Za-z0-9_-]*)?(?:api[_-]?key|apikey|secret|token|password|passwd|pwd|credentials?|authorization|auth|private[_-]?key|signing[_-]?key|client[_-]?id|access[_-]?(?:id|key))(?:[A-Za-z0-9_-]*)(?:["']?)\s*[=:]\s*)(["'])(?!<redacted)[^"'\n]+\2/gi, '$1$2<redacted>$2'],
+  // Secret-ish keys with UNQUOTED values at line start (env files, `export X=...`, YAML `X: value`).
+  [/^(\s*(?:export\s+)?)((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|PRIVATE|SIGNING|CLIENT_ID|ACCESS_ID)[A-Za-z0-9_]*)(\s*[=:]\s*)(?!<redacted)(?!["'])\S.*$/gim, '$1$2$3<redacted>'],
+  // Same keys assigned mid-line (container logs love `starting with API_KEY=...`). Uppercase keys, `=` only.
+  [/\b((?:[A-Z_][A-Z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD|CREDENTIALS?|AUTH|PRIVATE|SIGNING|CLIENT_ID|ACCESS_ID)[A-Z0-9_]*=)(?!<redacted)(?!["'])\S+/g, '$1<redacted>'],
   // CLI flags --token=xxx / --password xxx
   [/(--?(?:token|password|passwd|secret|api-?key|access-?key)[= ]+)(?!<redacted)["']?[^\s"']{4,}["']?/gi, '$1<redacted>'],
 ];

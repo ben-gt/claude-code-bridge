@@ -26,7 +26,7 @@ export class GitError extends Error {
 }
 
 /** Run a command, capture output, enforce a timeout. stdout/stderr are scrubbed. */
-export function run(cmd, args, { cwd, timeoutMs = 30_000, env = {}, input } = {}) {
+export function run(cmd, args, { cwd, timeoutMs = 30_000, env = {}, input, scrubOutput = true } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd,
@@ -51,7 +51,7 @@ export function run(cmd, args, { cwd, timeoutMs = 30_000, env = {}, input } = {}
     child.on('close', code => {
       if (done) return;
       done = true; clearTimeout(timer);
-      resolve({ code, stdout: scrub(out), stderr: scrub(err) });
+      resolve({ code, stdout: scrubOutput ? scrub(out) : out, stderr: scrubOutput ? scrub(err) : err });
     });
     if (input !== undefined) child.stdin.end(input); else child.stdin.end();
   });

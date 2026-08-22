@@ -4,6 +4,7 @@ import path from 'node:path';
 import { realWorkspaceRoot, isInside } from './paths.js';
 import { isGitRepo, currentBranchFast, remoteUrlFast, defaultBranch, workingTreeStatus } from './git.js';
 import { projectOverrides } from './config.js';
+import { findComposeFiles } from './compose.js';
 
 /** Parse YAML-ish frontmatter from an agent .md — we only need name/description. */
 export function parseAgentFile(file) {
@@ -106,6 +107,7 @@ export async function describeProject(cfg, name, dir, { withStatus = true } = {}
     remote,
     dirty,
     ...setup,
+    compose: findComposeFiles(dir),
     overrides: Object.keys(ov).length ? ov : undefined,
   };
 }

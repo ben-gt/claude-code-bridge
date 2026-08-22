@@ -27,6 +27,14 @@ test('redacts env-file style lines but keeps the key name', () => {
   assert.match(out, /WEBUI_SECRET_KEY: <redacted>/);
 });
 
+test('container-log style and bare keys', () => {
+  const out = scrub('PASSWORD=plain\napp | starting with SECRET_TOKEN=supersecretvalue123 and PORT=80\n{"SECRET_TOKEN": "abc123xyz", "name": "x"}');
+  assert.ok(!out.includes('plain'));
+  assert.ok(!out.includes('supersecretvalue123'));
+  assert.match(out, /PORT=80/);
+  assert.match(out, /"SECRET_TOKEN": "<redacted>", "name": "x"/);
+});
+
 test('redacts json fields', () => {
   const out = scrub('{"api_key": "abcd1234efgh", "name": "x", "password":"p@ssw0rd"}');
   assert.ok(!out.includes('abcd1234efgh'));

@@ -36,21 +36,46 @@
   },
 
   "claude": {
-    "_comment": "bin: claude executable (PATH or absolute). model: alias passed as --model, null = CLI default. extra_args: appended verbatim to every invocation.",
+    "_comment": "bin: claude executable (PATH or absolute). extra_args: appended verbatim to every invocation. Model choice lives under models.",
     "bin": "claude",
-    "model": null,
     "extra_args": ["--effort", "high"],
     "branch_prefix": "bridge/",
     "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
   },
 
+  "models": {
+    "_comment": "Tier names are policy; model ids must be ones the installed Claude Code accepts (confirmed for 2.1.240: claude-opus-5, claude-fable-5). An unavailable model fails the job loudly — no fallback. Escalation triggers are crude on purpose and expected to be tuned.",
+    "default_tier": "default",
+    "complex_tier": "complex",
+    "tiers": {
+      "default": { "model": "claude-opus-5", "max_cost_usd": 5, "aliases": ["opus"] },
+      "complex": { "model": "claude-fable-5", "max_cost_usd": 12, "aliases": ["fable"] }
+    },
+    "escalation": {
+      "complex_agents": ["system-architect", "product-intent-guardian"],
+      "prompt_length_chars": 2500,
+      "file_references": 6,
+      "plan_without_claude_setup": true,
+      "retry_after_failure": true
+    }
+  },
+
+  "compose": {
+    "_comment": "protected: project directory names OR compose project names the bridge refuses to restart/stop/up/redeploy (status/logs still work). Keep the stack serving the chat UI and any other MCP servers here. Remove an entry to opt out.",
+    "protected": ["openui", "form-submissions", "dms-v3-form-submissions", "claude-code-bridge"],
+    "redeploy_timeout_minutes": 15,
+    "restart_timeout_seconds": 180,
+    "logs_default_lines": 200
+  },
+
   "projects": {
-    "_comment": "Per-project overrides keyed by directory name. default_branch: use when it can't be inferred. allow_untracked: don't count untracked files as a dirty tree.",
+    "_comment": "Per-project overrides keyed by directory name. default_branch: use when it can't be inferred. allow_untracked: don't count untracked files as a dirty tree. tier: default model tier for this project (escalation can still raise it).",
     "my-app": {
       "default_branch": "develop",
       "job_timeout_minutes": 40,
       "max_cost_usd": 10,
-      "allow_untracked": true
+      "allow_untracked": true,
+      "tier": "complex"
     }
   }
 }

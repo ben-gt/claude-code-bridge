@@ -10,6 +10,8 @@ import { detectClaudeSetup } from './projects.js';
 import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, currentBranchFast, GitError } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
+import { selectModel } from './models.js';
+import { resolveComposeTarget, composeConfig, composeStatus, composeStream, validateServices, killGroup as composeKill, isProtected } from './compose.js';
 
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
 const ACTIVE = new Set(['queued', 'running']);
@@ -47,6 +49,7 @@ export class JobManager {
     this.jobs = new Map();      // id -> record
     this.procs = new Map();     // id -> { child, timer }
     this.writeTimers = new Map();
+    this.composeLocks = new Map(); // project -> description of a synchronous compose op in flight
   }
 
   // ---------- persistence ----------
@@ -56,7 +59,7 @@ export class JobManager {
   save(job, { immediate = false } = {}) {
     const write = () => {
       this.writeTimers.delete(job.id);
-      try { atomicWrite(this.recordFile(job.id), JSON.stringify(job, null, 2)); } catch (e) { this.log.error(`save ${job.id}: ${e.message}`); }
+      try { atomicWrite(this.recordFile(job.id), JSON.stringify(job, (k, v) => (k.startsWith('_') ? undefined : v), 2)); } catch (e) { this.log.error(`save ${job.id}: ${e.message}`); }
     };
     if (immediate) { clearTimeout(this.writeTimers.get(job.id)); write(); return; }
     if (!this.writeTimers.has(job.id)) this.writeTimers.set(job.id, setTimeout(write, 1000));
@@ -112,21 +115,23 @@ export class JobManager {
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, max)
       .map(j => ({
-        job_id: j.id, state: j.state, project: j.project, mode: j.mode, created_at: j.created_at,
+        job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode, created_at: j.created_at,
         elapsed_seconds: elapsedSeconds(j), summary: j.summary, branch: j.branch || undefined, pr_url: j.pr_url || undefined,
-        cost_usd: j.cost_usd ?? undefined, error: j.error || undefined,
+        cost_usd: j.cost_usd ?? undefined, model: j.model || undefined, error: j.error || undefined,
       }));
   }
 
   status(id) {
     const j = this.get(id);
     return scrubDeep({
-      job_id: j.id, state: j.state, project: j.project, mode: j.mode, agent: j.agent || undefined,
+      job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode, agent: j.agent || undefined,
       created_at: j.created_at, started_at: j.started_at || undefined, finished_at: j.finished_at || undefined,
       elapsed_seconds: elapsedSeconds(j), activity: j.activity,
       base_branch: j.base_branch || undefined, branch: j.branch || undefined, original_branch: j.original_branch || undefined,
       commits: j.commits ?? undefined, pushed: j.pushed ?? undefined, pr_url: j.pr_url || undefined,
-      session_id: j.session_id || undefined, model: j.model || undefined,
+      session_id: j.session_id || undefined,
+      model: j.model || j.model_selected || undefined, model_selected: j.model_selected || undefined, tier: j.tier || undefined, model_reason: j.model_reason || undefined,
+      compose: j.compose || undefined,
       cost_usd: j.cost_usd ?? undefined, usage: j.usage || undefined, num_turns: j.num_turns ?? undefined,
       limits: j.limits,
       result: j.result_text ? trunc(j.result_text, 6000) : undefined,
@@ -166,8 +171,41 @@ export class JobManager {
     return [...this.jobs.values()].find(j => j.project === project && ACTIVE.has(j.state));
   }
 
+  /** Throws if a job (Claude or compose) or a synchronous compose op is active on the project. */
+  assertProjectFree(project, what) {
+    const lock = this.composeLocks.get(project);
+    if (lock) throw new Error(`refused: ${project} has a compose operation in progress (${lock}); ${what} would fight it for the working tree`);
+    const busy = this.activeForProject(project);
+    if (busy) throw new Error(`refused: ${project} already has an active ${busy.kind === 'compose_redeploy' ? 'compose redeploy' : 'Claude Code'} job (${busy.id}, ${busy.state}); one operation per project`);
+  }
+
+  /** Hold a short lock while a synchronous compose op runs. */
+  async withComposeLock(project, what, fn) {
+    this.assertProjectFree(project, what);
+    this.composeLocks.set(project, what);
+    try { return await fn(); } finally { this.composeLocks.delete(project); }
+  }
+
+  /** Most recent failed Claude job on the same project with the same prompt (for retry escalation). */
+  findPriorFailure(project, prompt, retryOf) {
+    const norm = t => String(t).replace(/\s+/g, ' ').trim().toLowerCase();
+    if (retryOf) {
+      const j = this.jobs.get(retryOf);
+      if (!j) throw new Error(`retry_of ${retryOf} is not a known job`);
+      return { id: j.id, why: j.error && /cost ceiling/i.test(j.error) ? 'hit its cost ceiling' : `ended ${j.state}` };
+    }
+    const prev = [...this.jobs.values()]
+      .filter(j => (j.kind || 'claude') === 'claude' && j.project === project && ['failed', 'interrupted'].includes(j.state) && norm(j.prompt) === norm(prompt))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    if (!prev) return null;
+    // Only the most recent attempt matters; if it later succeeded, no escalation.
+    const newer = [...this.jobs.values()].find(j => j.project === project && norm(j.prompt) === norm(prompt) && j.state === 'completed' && j.created_at > prev.created_at);
+    if (newer) return null;
+    return { id: prev.id, why: prev.error && /cost ceiling/i.test(prev.error) ? 'hit its cost ceiling' : `ended ${prev.state}` };
+  }
+
   // ---------- start ----------
-  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes }) {
+  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, retry_of }) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) throw new Error('prompt is required');
     if (!['plan', 'execute'].includes(mode)) throw new Error(`mode must be "plan" or "execute" (got ${mode})`);
     const dir = resolveProjectDir(this.cfg, project);
@@ -178,8 +216,10 @@ export class JobManager {
       throw new Error(`agent "${agent}" not found in ${name}/.claude/agents (available: ${setup.agents.map(a => a.name).join(', ') || 'none'})`);
     }
     if (base_branch && (!/^[A-Za-z0-9._\/-]{1,200}$/.test(base_branch) || base_branch.startsWith('-') || base_branch.includes('..'))) throw new Error('invalid base_branch');
-    const busy = this.activeForProject(name);
-    if (busy) throw new Error(`project ${name} already has an active job (${busy.id}, ${busy.state}); one job per project`);
+    this.assertProjectFree(name, 'a Claude Code job');
+    if (complexity && !['low', 'normal', 'high'].includes(complexity)) throw new Error('complexity must be low, normal or high');
+    const priorFailure = this.findPriorFailure(name, prompt, retry_of);
+    const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure });
 
     // Refuse a dirty tree before anything else (and before Claude is ever invoked).
     const st = await workingTreeStatus(dir, { includeUntracked: !ov.allow_untracked, timeoutMs: 20_000 });
@@ -196,11 +236,13 @@ export class JobManager {
 
     const limits = {
       timeout_minutes: timeout_minutes ?? ov.job_timeout_minutes ?? this.cfg.limits.job_timeout_minutes,
-      max_cost_usd: max_cost_usd ?? ov.max_cost_usd ?? this.cfg.limits.max_cost_usd,
+      // Ceiling precedence: explicit arg > project override > tier ceiling > global.
+      max_cost_usd: max_cost_usd ?? ov.max_cost_usd ?? choice.max_cost_usd ?? this.cfg.limits.max_cost_usd,
     };
     const id = newJobId();
     const job = {
-      id, project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
+      id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
+      model_selected: choice.model, tier: choice.tier, model_reason: choice.reason, retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, original_branch: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
@@ -209,9 +251,9 @@ export class JobManager {
     fs.mkdirSync(this.jobDir(id), { recursive: true });
     this.jobs.set(id, job);
     this.save(job, { immediate: true });
-    this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode}${agent ? ` agent=${agent}` : ''}`);
+    this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode}${agent ? ` agent=${agent}` : ''} model=${choice.model} tier=${choice.tier} (${choice.reason})`);
     setImmediate(() => this.pump());
-    return { job_id: id, state: job.state, project: name, mode, queue_position: this.queuePosition(id), limits };
+    return { job_id: id, state: job.state, project: name, mode, model: choice.model, tier: choice.tier, model_reason: choice.reason, queue_position: this.queuePosition(id), limits };
   }
 
   /** Start queued jobs while capacity allows. */
@@ -224,7 +266,8 @@ export class JobManager {
       job.started_at = nowIso();
       job.activity = 'starting';
       this.save(job, { immediate: true });
-      this.runJob(job).catch(e => {
+      const runner = job.kind === 'compose_redeploy' ? this.runComposeJob(job) : this.runJob(job);
+      runner.catch(e => {
         this.log.error(`job ${job.id} crashed: ${e.stack || e.message}`);
         this.finish(job, 'failed', `internal error: ${scrub(e.message)}`);
       });
@@ -293,6 +336,7 @@ export class JobManager {
       await this.postProcess(job, { remote, abnormal: true });
       return this.finish(job, 'failed', `claude exited with code ${exit.code}${exit.lastStderr ? `: ${trunc(exit.lastStderr, 400)}` : ''}`);
     }
+    if (job._modelUnrecognized && !job._resultError) job._resultError = `model "${job.model_selected}" (tier ${job.tier}) is not available to this Claude Code login — no fallback attempted`;
     if (job._resultError) {
       await this.postProcess(job, { remote, abnormal: true });
       return this.finish(job, 'failed', job._resultError);
@@ -310,7 +354,7 @@ export class JobManager {
       args.push('--permission-mode', 'bypassPermissions');
     }
     if (job.agent) args.push('--agent', job.agent);
-    if (c.model) args.push('--model', c.model);
+    if (job.model_selected) args.push('--model', job.model_selected);
     args.push('--append-system-prompt', this.systemPrompt(job, { remote }));
     if (Array.isArray(c.extra_args)) args.push(...c.extra_args);
     return args;
@@ -379,6 +423,7 @@ export class JobManager {
       child.stderr.on('data', chunk => {
         const s = scrub(String(chunk));
         lastStderr = (lastStderr + s).slice(-2000);
+        if (/unrecognized_model/.test(s)) job._modelUnrecognized = true;
         for (const l of s.split('\n')) if (l.trim()) this.appendTranscript(job, `stderr: ${trunc(l, 300)}`);
       });
       child.on('error', e => { lastStderr += e.message; });
@@ -408,6 +453,7 @@ export class JobManager {
     if (t === 'system' && ev.subtype === 'init') {
       job.session_id = ev.session_id || job.session_id;
       job.model = ev.model || job.model;
+      if (job.model_selected && job.model && job.model !== job.model_selected) job.notes.push(`model mismatch: requested ${job.model_selected}, session reports ${job.model}`);
       job.activity = `session started (${job.model || 'model?'})`;
       this.appendTranscript(job, `>> session ${job.session_id} started, model=${job.model}, tools=${Array.isArray(ev.tools) ? ev.tools.length : '?'}${ev.permissionMode ? `, permissions=${ev.permissionMode}` : ''}`);
     } else if (t === 'assistant' && ev.message?.content) {
@@ -436,7 +482,9 @@ export class JobManager {
       job.num_turns = ev.num_turns ?? job.num_turns;
       if (ev.usage) job.usage = { ...(job.usage || {}), ...pickUsage(ev.usage) };
       job.result_text = scrub(typeof ev.result === 'string' ? ev.result : JSON.stringify(ev.result ?? ''));
-      if (ev.is_error) job._resultError = `claude reported an error (${ev.subtype || 'error'}): ${trunc(job.result_text || '', 500)}`;
+      if (ev.is_error && /issue with the selected model|unrecognized.?model|model.*not.?found|does not exist or you do not have access/i.test(job.result_text || '')) {
+        job._resultError = `model "${job.model_selected}" (tier ${job.tier}) is not available to this Claude Code login — no fallback attempted; fix models.tiers in config.json or pass model=`;
+      } else if (ev.is_error) job._resultError = `claude reported an error (${ev.subtype || 'error'}): ${trunc(job.result_text || '', 500)}`;
       else if (ev.subtype && ev.subtype !== 'success') job.notes.push(`result subtype: ${ev.subtype}`);
       if (ev.subtype === 'error_max_budget_usd' || /max.?budget/i.test(ev.subtype || '')) job._resultError = `cost ceiling of $${job.limits.max_cost_usd} reached (spent $${job.cost_usd}); job stopped`;
       if (job.mode === 'plan' && job.result_text) {
@@ -557,6 +605,80 @@ export class JobManager {
     }
   }
 
+  // ---------- compose redeploy (async job) ----------
+  async startComposeRedeploy({ project, file, services, profile, no_cache = false, remove_orphans = false, timeout_minutes }) {
+    const target = resolveComposeTarget(this.cfg, project, { file, profile });
+    if (target.protectedBy) throw new Error(`refused: ${target.protectedBy}. Use a terminal on the box for this stack.`);
+    const svc = validateServices(services);
+    this.assertProjectFree(target.project, 'a compose redeploy');
+    const id = newJobId();
+    const job = {
+      id, kind: 'compose_redeploy', project: target.project, project_path: target.dir, mode: 'redeploy', agent: null,
+      prompt: `compose redeploy ${target.files.join(',')}${svc.length ? ` [${svc.join(',')}]` : ''}`,
+      summary: `compose redeploy ${target.project}${svc.length ? ` (${svc.join(', ')})` : ''}${no_cache ? ' --no-cache' : ''}`,
+      state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
+      compose: { file: file || null, files: target.files, profile: profile || null, services: svc, no_cache: !!no_cache, remove_orphans: !!remove_orphans, project_name: null, steps: [], before: null, after: null, current_step: null },
+      error: null, notes: [], pid: null,
+      limits: { timeout_minutes: timeout_minutes ?? this.cfg.compose?.redeploy_timeout_minutes ?? 15 },
+    };
+    fs.mkdirSync(this.jobDir(id), { recursive: true });
+    this.jobs.set(id, job);
+    this.save(job, { immediate: true });
+    this.appendTranscript(job, `job ${id} queued: ${job.summary}`);
+    setImmediate(() => this.pump());
+    return { job_id: id, state: job.state, project: target.project, files: target.files, services: svc, limits: job.limits };
+  }
+
+  async runComposeJob(job) {
+    const c = job.compose;
+    const target = resolveComposeTarget(this.cfg, job.project, { file: c.file, profile: c.profile });
+    job._target = target;
+    const deadline = Date.now() + job.limits.timeout_minutes * 60_000;
+    const holder = {}; job._composeHolder = holder;
+    const line = l => this.appendTranscript(job, l);
+    const step = async (name, args, { skip = false } = {}) => {
+      if (skip) { c.steps.push({ name, state: 'skipped' }); return true; }
+      if (job._cancelled) return false;
+      c.current_step = name; job.activity = `compose ${name}`; this.save(job, { immediate: true });
+      line(`== ${name}: docker compose ${args.join(' ')}`);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) { c.steps.push({ name, state: 'not started (timed out)' }); return false; }
+      const t0 = Date.now();
+      const r = await composeStream(target, args, { onLine: line, timeoutMs: remaining, signalHolder: holder });
+      const entry = { name, state: r.timedOut ? 'timed out' : r.code === 0 ? 'ok' : `exit ${r.code}`, seconds: Math.round((Date.now() - t0) / 1000) };
+      c.steps.push(entry);
+      this.save(job);
+      if (r.timedOut) { job._timedOutStep = name; return false; }
+      return r.code === 0;
+    };
+    try {
+      const cfgInfo = await composeConfig(target);
+      c.project_name = cfgInfo.name;
+      const prot = isProtected(this.cfg, job.project, cfgInfo.name);
+      if (prot) return this.finish(job, 'failed', `refused: ${prot}`);
+      const targeted = c.services.length ? cfgInfo.services.filter(s => c.services.includes(s.name)) : cfgInfo.services;
+      const unknown = c.services.filter(n => !cfgInfo.services.some(s => s.name === n));
+      if (unknown.length) return this.finish(job, 'failed', `unknown service(s): ${unknown.join(', ')} (available: ${cfgInfo.services.map(s => s.name).join(', ')})`);
+      c.before = await composeStatus(target, c.services);
+      line(`before: ${summarise(c.before)}`);
+      const hasBuild = targeted.some(s => s.build);
+      const hasImage = targeted.some(s => !s.build);
+      let ok = await step('pull', ['pull', '--ignore-buildable', ...c.services], { skip: !hasImage });
+      if (ok) ok = await step('build', ['build', '--pull', ...(c.no_cache ? ['--no-cache'] : []), ...c.services], { skip: !hasBuild });
+      if (ok) ok = await step('up', ['up', '-d', '--no-build', ...(c.remove_orphans ? ['--remove-orphans'] : []), ...c.services]);
+      c.current_step = null;
+      try { c.after = await composeStatus(target, c.services); line(`after: ${summarise(c.after)}`); } catch (e) { job.notes.push(`could not read post-run status: ${scrub(e.message)}`); }
+      if (job._cancelled) return; // cancel() finishes the job
+      if (job._timedOutStep) return this.finish(job, 'failed', `timed out after ${job.limits.timeout_minutes} min during "${job._timedOutStep}"; partial state recorded in compose.before/after (steps: ${c.steps.map(s => `${s.name}=${s.state}`).join(', ')})`);
+      if (!ok) { const bad = c.steps.find(s => /exit/.test(s.state)); return this.finish(job, 'failed', `step "${bad?.name}" failed (${bad?.state}); see log. Steps: ${c.steps.map(s => `${s.name}=${s.state}`).join(', ')}`); }
+      job.result_text = `redeploy ok: ${c.steps.map(s => `${s.name}=${s.state}`).join(', ')}\nbefore: ${summarise(c.before)}\nafter: ${summarise(c.after)}`;
+      this.finish(job, 'completed');
+    } catch (e) {
+      try { c.after = await composeStatus(target, c.services); } catch { /* ignore */ }
+      this.finish(job, 'failed', `compose redeploy error: ${scrub(e.message)}`);
+    }
+  }
+
   // ---------- cancel ----------
   async cancel(id, { keep_branch = false } = {}) {
     const job = this.get(id);
@@ -575,6 +697,15 @@ export class JobManager {
       const exited = new Promise(res => p.child.once('close', res));
       this.killTree(job);
       await Promise.race([exited, new Promise(r => setTimeout(r, 8000))]);
+    }
+    if (job.kind === 'compose_redeploy') {
+      job._cancelled = true;
+      const stepAtCancel = job.compose.current_step || '?';
+      if (job._composeHolder?.child) composeKill(job._composeHolder.child.pid);
+      await new Promise(r => setTimeout(r, 1500));
+      try { job.compose.after = await composeStatus(job._target || resolveComposeTarget(this.cfg, job.project, { file: job.compose.file, profile: job.compose.profile }), job.compose.services); } catch (e) { job.notes.push(`could not read post-cancel status: ${scrub(e.message)}`); }
+      this.finish(job, 'cancelled', `cancelled during step "${stepAtCancel}"; see compose.after for the resulting state`);
+      return { job_id: id, state: 'cancelled', cleanup: ['compose process terminated; containers left in whatever state the interrupted step produced (see get_task_status compose.after)'] };
     }
     const cleanup = [];
     if (job.mode === 'execute' && job.branch) {
@@ -611,8 +742,15 @@ export class JobManager {
 
   /** Kill all running children (server shutdown). Jobs are marked interrupted on next init(). */
   shutdown() {
+    for (const job of this.jobs.values()) if (job._composeHolder?.child) composeKill(job._composeHolder.child.pid);
     for (const [id] of this.procs) { const job = this.jobs.get(id); if (job) { this.killTree(job); job.state = 'interrupted'; job.finished_at = nowIso(); job.error = 'server shut down while the job was running'; this.save(job, { immediate: true }); } }
   }
+}
+
+function summarise(list) {
+  if (!Array.isArray(list)) return '(unknown)';
+  if (!list.length) return '(no containers)';
+  return list.map(c => `${c.service}=${c.state}${c.health ? `/${c.health}` : ''}`).join(' ');
 }
 
 function elapsedSeconds(j) {
