@@ -67,6 +67,13 @@ scripts/register-openwebui.sh                      # id=claude_code, private (ad
 scripts/register-openwebui.sh claude_code http://172.20.0.1:4010/mcp --public
 ```
 
+### How it appears in Open WebUI (this box)
+
+- Connection id `claude_code` → tools are namespaced `claude_code_<tool>` (e.g. `claude_code_start_task`). Registered private (admin-only); `scripts/register-openwebui.sh … --public` to open it up.
+- The Beyond pipe (`~/code/openui/plugins/beyond_auto.py`) **gates** the whole `claude_code_` toolkit behind the Toolkit Gate (`toolkit "claude-code"`), like Synceriser and Local IMS Testing: the 14 specs aren't sent to the model until the user agrees ("just for this request or the whole chat?"). The pipe's system prompt also tells the model how to use the environment: start with `list_projects`, `start_task` is plan-mode unless the user clearly wants changes, poll status/log and report the plan or branch + draft PR, relay protected-stack refusals as-is.
+- Verified 2026-08-22: Open WebUI handshakes with the bridge (protocol 2025-11-25), the gate hides the tools until granted, and a granted chat turn executed `list_projects` through Open WebUI's own tool loop (bridge journal: `tool list_projects ok`). Every tool call is logged to the journal as `tool <name> ok|error <ms>` — never the arguments.
+- If the bridge is down, the tools simply disappear from the chat; the prompt tells the model to say so rather than error.
+
 Call a tool from the shell for debugging:
 
 ```sh

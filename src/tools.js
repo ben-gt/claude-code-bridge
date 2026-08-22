@@ -18,6 +18,15 @@ function fail(err) {
 const wrap = fn => async args => { try { return await fn(args ?? {}); } catch (e) { return fail(e); } };
 
 export function registerTools(server, { cfg, projects, jobs, log }) {
+  // Log every tool call (name, outcome, duration) — never the arguments, which may carry prompts/paths.
+  const origRegister = server.registerTool.bind(server);
+  server.registerTool = (name, config, handler) => origRegister(name, config, async (args, extra) => {
+    const t0 = Date.now();
+    const r = await handler(args, extra);
+    const msg = `tool ${name} ${r?.isError ? 'error' : 'ok'} ${Date.now() - t0}ms${r?.isError ? `: ${String(r.content?.[0]?.text || '').slice(0, 200)}` : ''}`;
+    if (r?.isError) log.warn(msg); else log.info(msg);
+    return r;
+  });
   server.registerTool('list_projects', {
     title: 'List projects',
     description: `Rescan the workspace root (${cfg.workspace_root}) and list every git repository in it: name, current branch, default branch, remote (credentials stripped), whether the working tree is dirty, whether a .claude setup exists (CLAUDE.md / .claude/preflight.md / .claude/agents) and which agents it exposes. Results are cached and refreshed on every call.`,
@@ -29,7 +38,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     const list = await projects.list({ refresh: true });
     const out = filter ? list.filter(p => p.name.toLowerCase().includes(filter.toLowerCase())) : list;
     return ok({ workspace_root: cfg.workspace_root, count: out.length, projects: out });
-  }));
+  }, 'list_projects'));
 
   server.registerTool('clone_project', {
     title: 'Clone a repository into the workspace',
@@ -48,7 +57,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     projects.invalidate();
     if (r.status === 'cloned') await projects.scan().catch(() => {});
     return ok(r, r.message || `${r.status}: ${r.name} at ${r.path}${r.branch ? ` (branch ${r.branch})` : ''}`);
-  }));
+  }, 'clone_project'));
 
   server.registerTool('list_available_repos', {
     title: 'List repos visible to the stored credentials',
@@ -58,7 +67,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       query: z.string().optional().describe('Case-insensitive substring match on full name / description'),
       limit: z.number().int().min(1).max(500).optional().describe('Max repos to return (default 100)'),
     },
-  }, wrap(async args => ok(await listAvailableRepos(cfg, args))));
+  }, wrap(async args => ok(await listAvailableRepos(cfg, args)), 'list_available_repos'));
 
   server.registerTool('start_task', {
     title: 'Start a Claude Code task',
@@ -78,13 +87,13 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   }, wrap(async args => {
     const r = await jobs.start(args);
     return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}). Poll get_task_status with this job_id.`);
-  }));
+  }, 'start_task'));
 
   server.registerTool('get_task_status', {
     title: 'Get task status',
     description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, cost/usage, and the final result or plan text when finished.',
     inputSchema: { job_id: z.string() },
-  }, wrap(async ({ job_id }) => ok(jobs.status(job_id))));
+  }, wrap(async ({ job_id }) => ok(jobs.status(job_id)), 'get_task_status'));
 
   server.registerTool('get_task_log', {
     title: 'Get task log',
@@ -98,13 +107,13 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   }, wrap(async args => {
     const r = jobs.readLog(args.job_id, args);
     return ok(r, r.text || (r.eof ? '(empty log)' : '(nothing new yet)'));
-  }));
+  }, 'get_task_log'));
 
   server.registerTool('cancel_task', {
     title: 'Cancel a task',
     description: 'Terminate a queued or running job. By default discards uncommitted agent changes, restores the original branch and deletes the job branch so nothing is orphaned; pass keep_branch=true to commit partial work and keep the branch instead.',
     inputSchema: { job_id: z.string(), keep_branch: z.boolean().optional() },
-  }, wrap(async args => ok(await jobs.cancel(args.job_id, args))));
+  }, wrap(async args => ok(await jobs.cancel(args.job_id, args)), 'cancel_task'));
 
   server.registerTool('list_jobs', {
     title: 'List recent jobs',
@@ -114,7 +123,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       project: z.string().optional(),
       state: z.enum(['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted']).optional(),
     },
-  }, wrap(async args => ok({ jobs: jobs.list(args) })));
+  }, wrap(async args => ok({ jobs: jobs.list(args) }), 'list_jobs'));
 
   // ---------------- Docker Compose ----------------
   const composeArgs = {
@@ -135,7 +144,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     const svc = validateServices(services);
     const list = await composeStatus(target, svc);
     return ok({ project: target.project, files: target.files, protected: !!target.protectedBy, services: list }, statusText(list));
-  }));
+  }, 'compose_status'));
 
   server.registerTool('compose_logs', {
     title: 'Compose logs',
@@ -145,7 +154,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     const target = resolveComposeTarget(cfg, project, { file, profile });
     const text = await composeLogs(target, { services: validateServices(services), lines: lines ?? cfg.compose?.logs_default_lines ?? 200, since });
     return ok({ project: target.project, files: target.files, text }, text || '(no log output)');
-  }));
+  }, 'compose_logs'));
 
   const syncOp = (verb, subArgs, timeoutMs) => async ({ project, file, services, profile }) => {
     const target = resolveComposeTarget(cfg, project, { file, profile });
@@ -165,9 +174,9 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     });
   };
   const restartTimeout = (cfg.compose?.restart_timeout_seconds ?? 180) * 1000;
-  server.registerTool('compose_restart', { title: 'Compose restart', description: `Restart running services (docker compose restart). No rebuild, no pull. Returns service state before and after. ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('restart', ['restart'], restartTimeout)));
-  server.registerTool('compose_stop', { title: 'Compose stop', description: `Stop services (docker compose stop — containers are kept, nothing is removed). ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('stop', ['stop'], restartTimeout)));
-  server.registerTool('compose_up', { title: 'Compose up', description: `Start services (docker compose up -d --no-build; use compose_redeploy to pull/build). ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('up', ['up', '-d', '--no-build'], restartTimeout)));
+  server.registerTool('compose_restart', { title: 'Compose restart', description: `Restart running services (docker compose restart). No rebuild, no pull. Returns service state before and after. ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('restart', ['restart'], restartTimeout), 'compose_restart'));
+  server.registerTool('compose_stop', { title: 'Compose stop', description: `Stop services (docker compose stop — containers are kept, nothing is removed). ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('stop', ['stop'], restartTimeout), 'compose_stop'));
+  server.registerTool('compose_up', { title: 'Compose up', description: `Start services (docker compose up -d --no-build; use compose_redeploy to pull/build). ${protectedNote}`, inputSchema: composeArgs }, wrap(syncOp('up', ['up', '-d', '--no-build'], restartTimeout), 'compose_up'));
 
   server.registerTool('compose_redeploy', {
     title: 'Compose redeploy (async)',
@@ -176,7 +185,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   }, wrap(async args => {
     const r = await jobs.startComposeRedeploy(args);
     return ok(r, `compose redeploy job ${r.job_id} queued for ${r.project} (${r.files.join(', ')}). Poll get_task_status.`);
-  }));
+  }, 'compose_redeploy'));
 
-  log.info('tools registered: list_projects, clone_project, list_available_repos, start_task, get_task_status, get_task_log, cancel_task, list_jobs');
+  // (tools registered)
 }

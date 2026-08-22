@@ -85,7 +85,7 @@ async function main() {
       'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Nothing is ever merged automatically.',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
     ].join('\n') });
-    registerTools(server, { cfg, projects, jobs, log: { info: () => {}, warn: log.warn, error: log.error } });
+    registerTools(server, { cfg, projects, jobs, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {
