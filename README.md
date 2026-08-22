@@ -54,6 +54,7 @@ cd ~/code/claude-code-bridge
 npm install
 npm test                      # unit tests: scrubbing, path guards, clone source parsing
 scripts/install.sh            # writes /etc/systemd/system/claude-code-bridge.service, enables + starts it
+scripts/restart-safe.sh       # deploy-time restart: waits for running/queued jobs to finish first
 systemctl status claude-code-bridge
 journalctl -u claude-code-bridge -f
 ```
@@ -83,6 +84,8 @@ scripts/mcp-call.sh get_task_log '{"job_id":"j_…","offset":0}'
 ```
 
 ### On boot / restart
+
+**Deploying a change: use `scripts/restart-safe.sh`, not a bare `systemctl restart`** — a bare restart kills every running job and marks it `interrupted` (the working tree is left on the job branch for inspection). `restart-safe.sh` waits until nothing is running or queued, then restarts.
 
 The unit has `Restart=always` and `KillMode=control-group`, so Claude child processes die with the server. On every start the bridge loads the job records and marks anything still `queued`/`running` as **`interrupted`** (killing a stray pid if one survived). The project's working tree is left exactly as it was for inspection — which also means the next `start_task` on that project will be refused as dirty until a human sorts it out (or `cancel_task`-style cleanup is done by hand: `git checkout <original-branch>; git branch -D bridge/…`). Leftover temp clone dirs (`~/code/.bridge-tmp`) are removed at start.
 
