@@ -13,11 +13,11 @@ It is general-purpose infrastructure: it knows nothing about any particular proj
 
 | Tool | Purpose |
 |---|---|
-| `list_projects` | Rescan `~/code` and list every git repo: name, current/default branch, remote (creds stripped), dirty flag, `.claude` setup (CLAUDE.md / preflight / agents) and agent names. Optional `filter`. |
+| `list_projects` | Rescan `~/code` and list every git repo: name, current/default branch, remote (creds stripped), dirty flag, `.claude` setup (CLAUDE.md / preflight / agents), agent names, compose file names. Compact by default (~16 KB for 60 repos); `verbose=true` adds paths, agent descriptions and compose metadata. Optional `filter`. |
 | `clone_project` | Clone into `~/code/<name>` using the stored git credentials. Args: `url` **or** `repo` (`owner/repo` + optional `host`), optional `name`, `branch`, `depth`, `full_history`. Shallow by default. Never overwrites — an existing dir returns its path untouched. |
 | `list_available_repos` | Repos visible to the stored credentials on each configured host (GitHub, Gitea, GitLab). Marks ones already cloned. Args: `host`, `query`, `limit`. |
 | `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
-| `get_task_status` | State, elapsed, current activity, branch, PR URL, session id, model, cost/usage, final result / plan text. |
+| `get_task_status` | State, elapsed, current activity, branch, PR URL, model, cost, final result / plan text. **Long-polls while a job is active** (`wait_seconds`, default 20, max 50): one call waits for the next state/activity change instead of the caller spinning. Running jobs get a lean payload (~350 bytes); the full record arrives when the job ends. |
 | `get_task_log` | Scrubbed human-readable transcript; `offset` → `next_offset` for incremental polling; `raw=true` for the stream-json events. |
 | `cancel_task` | Kill a queued/running job. Default: discard uncommitted agent work, restore the original branch, delete the job branch. `keep_branch=true` commits partial work and keeps the branch. |
 | `list_jobs` | Recent jobs (Claude tasks and compose redeploys) with state, project, model, one-line summary. Filter by `project` / `state`. |
@@ -67,6 +67,10 @@ Register with the local Open WebUI (uses the same `mcp-connections.sh` helper as
 scripts/register-openwebui.sh                      # id=claude_code, private (admin-only) by default
 scripts/register-openwebui.sh claude_code http://172.20.0.1:4010/mcp --public
 ```
+
+### Keeping chat context small
+
+Every tool result a chat model sees stays in that chat's history. A long execute job that was status-polled ~190 times put ~280 KB of near-identical JSON into one chat and eventually overflowed the model's context (empty replies). Mitigations: `get_task_status` long-polls and returns a lean payload while running; `list_projects` is compact by default; `get_task_log` is incremental (`offset`/`next_offset`, 16 KB chunks); and on the Open WebUI side the Beyond pipe compacts tool results older than the last two user turns before each model call.
 
 ### How it appears in Open WebUI (this box)
 

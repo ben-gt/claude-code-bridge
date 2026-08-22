@@ -32,13 +32,23 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     description: `Rescan the workspace root (${cfg.workspace_root}) and list every git repository in it: name, current branch, default branch, remote (credentials stripped), whether the working tree is dirty, whether a .claude setup exists (CLAUDE.md / .claude/preflight.md / .claude/agents) and which agents it exposes. Results are cached and refreshed on every call.`,
     inputSchema: {
       filter: z.string().optional().describe('Case-insensitive substring to match against project names'),
-      with_status: z.boolean().optional().describe('Include dirty-tree status (default true; slower on many repos)'),
+      verbose: z.boolean().optional().describe('Full detail per project (paths, agent descriptions, compose file metadata). Default is a compact listing.'),
     },
-  }, wrap(async ({ filter }) => {
+  }, wrap(async ({ filter, verbose }) => {
     const list = await projects.list({ refresh: true });
-    const out = filter ? list.filter(p => p.name.toLowerCase().includes(filter.toLowerCase())) : list;
-    return ok({ workspace_root: cfg.workspace_root, count: out.length, projects: out });
-  }, 'list_projects'));
+    let out = filter ? list.filter(p => p.name.toLowerCase().includes(filter.toLowerCase())) : list;
+    if (!verbose) {
+      // Compact by default: this result lands in the chat context verbatim and is often called more than once.
+      out = out.map(p => ({
+        name: p.name, current_branch: p.current_branch, default_branch: p.default_branch, remote: p.remote, dirty: p.dirty,
+        has_claude_setup: p.has_claude_setup, claude_md: p.claude_md || undefined, preflight: p.preflight || undefined,
+        agents: p.agents.length ? p.agents.map(a => a.name) : undefined,
+        compose: p.compose.length ? p.compose.map(c => c.file) : undefined,
+        overrides: p.overrides,
+      }));
+    }
+    return ok({ workspace_root: cfg.workspace_root, count: out.length, projects: out, note: verbose ? undefined : 'compact view; pass verbose=true for paths, agent descriptions and compose detail' });
+  }));
 
   server.registerTool('clone_project', {
     title: 'Clone a repository into the workspace',
@@ -91,9 +101,13 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
 
   server.registerTool('get_task_status', {
     title: 'Get task status',
-    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, cost/usage, and the final result or plan text when finished.',
-    inputSchema: { job_id: z.string() },
-  }, wrap(async ({ job_id }) => ok(jobs.status(job_id)), 'get_task_status'));
+    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, model used + tier + why, cost, and the final result or plan text when finished. While a job is running this LONG-POLLS: it waits up to wait_seconds (default 20, max 50) for the state/activity to change before answering, so call it once per check rather than repeatedly. Running jobs return a lean payload; the full record comes when the job ends. For compose redeploy jobs: steps and service state before/after.',
+    inputSchema: { job_id: z.string(), wait_seconds: z.number().min(0).max(50).optional().describe('Seconds to wait for a change while the job is active (default 20; 0 = answer immediately)') },
+  }, wrap(async ({ job_id, wait_seconds }) => {
+    const w = wait_seconds === undefined ? 20 : wait_seconds;
+    if (w > 0) await jobs.waitForChange(job_id, w * 1000);
+    return ok(jobs.status(job_id));
+  }));
 
   server.registerTool('get_task_log', {
     title: 'Get task log',

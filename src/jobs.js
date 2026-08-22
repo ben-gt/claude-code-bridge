@@ -121,8 +121,37 @@ export class JobManager {
       }));
   }
 
+  /** Resolve when the job's state or activity changes, or after timeoutMs. */
+  waitForChange(id, timeoutMs) {
+    const j = this.get(id);
+    if (!ACTIVE.has(j.state)) return Promise.resolve(false);
+    const snap = `${j.state}|${j.activity}|${j.branch}|${j.pr_url}`;
+    return new Promise(resolve => {
+      const started = Date.now();
+      const tick = () => {
+        const cur = this.jobs.get(id);
+        if (!cur || `${cur.state}|${cur.activity}|${cur.branch}|${cur.pr_url}` !== snap || !ACTIVE.has(cur.state)) return resolve(true);
+        if (Date.now() - started >= timeoutMs) return resolve(false);
+        setTimeout(tick, 500);
+      };
+      setTimeout(tick, 500);
+    });
+  }
+
   status(id) {
     const j = this.get(id);
+    const active = ACTIVE.has(j.state);
+    if (active) {
+      // Lean while running: callers poll this, and every byte lands in the chat context.
+      return scrubDeep({
+        job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode,
+        elapsed_seconds: elapsedSeconds(j), activity: j.activity, branch: j.branch || undefined,
+        model: j.model || j.model_selected || undefined, cost_usd: j.cost_usd ?? undefined,
+        queue_position: j.state === 'queued' ? this.queuePosition(j.id) : undefined,
+        compose_steps: j.compose?.steps?.length ? j.compose.steps.map(s => `${s.name}=${s.state}`).join(', ') : undefined,
+        hint: 'still running — call again with wait_seconds (default 20) to long-poll instead of spinning; get_task_log for detail',
+      });
+    }
     return scrubDeep({
       job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode, agent: j.agent || undefined,
       created_at: j.created_at, started_at: j.started_at || undefined, finished_at: j.finished_at || undefined,
@@ -134,7 +163,7 @@ export class JobManager {
       compose: j.compose || undefined,
       cost_usd: j.cost_usd ?? undefined, usage: j.usage || undefined, num_turns: j.num_turns ?? undefined,
       limits: j.limits,
-      result: j.result_text ? trunc(j.result_text, 6000) : undefined,
+      result: j.result_text ? trunc(j.result_text, 4000) : undefined,
       plan_file: j.plan_file || undefined,
       error: j.error || undefined, notes: j.notes?.length ? j.notes : undefined,
       queue_position: j.state === 'queued' ? this.queuePosition(j.id) : undefined,
