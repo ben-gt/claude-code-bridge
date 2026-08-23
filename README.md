@@ -70,7 +70,7 @@ scripts/register-openwebui.sh claude_code http://172.20.0.1:4010/mcp --public
 
 ### Keeping chat context small
 
-Every tool result a chat model sees stays in that chat's history. A long execute job that was status-polled ~190 times put ~280 KB of near-identical JSON into one chat and eventually overflowed the model's context (empty replies). Mitigations: `get_task_status` long-polls and returns a lean payload while running; `list_projects` is compact by default; `get_task_log` is incremental (`offset`/`next_offset`, 16 KB chunks); and on the Open WebUI side the Beyond pipe compacts tool results older than the last two user turns before each model call.
+Every tool result a chat model sees stays in that chat's history. A long execute job that was status-polled ~190 times put ~280 KB of near-identical JSON into one chat and eventually overflowed the model's context (empty replies). Mitigations: `get_task_status` long-polls and returns a lean payload while running; `list_projects` is compact by default; `get_task_log` is incremental (`offset`/`next_offset`, 16 KB chunks); and on the Open WebUI side the Beyond pipe compacts tool results older than the last two user turns before each model call, shows a context meter, and asks before compacting the chat at 65% of the window (see `~/code/openui/CONTEXT-COMPACTION.md`).
 
 ### How it appears in Open WebUI (this box)
 
