@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { resolveProjectDir, BoundaryError } from './paths.js';
 import { projectOverrides } from './config.js';
 import { detectClaudeSetup } from './projects.js';
-import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, currentBranchFast, GitError } from './git.js';
+import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
 import { selectModel } from './models.js';
@@ -74,7 +74,7 @@ export class JobManager {
           if (pidAlive(job.pid)) { try { process.kill(-job.pid, 'SIGKILL'); } catch { try { process.kill(job.pid, 'SIGKILL'); } catch { /* gone */ } } }
           job.state = 'interrupted';
           job.finished_at = job.finished_at || nowIso();
-          job.error = job.error || 'server restarted while the job was active; working tree left as-is for inspection';
+          job.error = job.error || 'server restarted while the job was active; its worktree was removed — any commits survive on the job branch';
           job.activity = 'interrupted';
           this.appendTranscript(job, `!! job marked interrupted at server start (${job.error})`);
           atomicWrite(this.recordFile(id), JSON.stringify(job, null, 2));
@@ -86,6 +86,24 @@ export class JobManager {
     }
     this.log.info(`jobs: loaded ${loaded} record(s), ${interrupted} marked interrupted`);
     this.pruneOld();
+    this.sweepWorktrees().catch(e => this.log.error(`worktree sweep failed: ${e.message}`));
+  }
+
+  /** Remove worktrees left behind by interrupted/crashed jobs (startup housekeeping). */
+  async sweepWorktrees() {
+    const wtRoot = path.join(this.cfg.data_dir, 'worktrees');
+    let entries = [];
+    try { entries = fs.readdirSync(wtRoot); } catch { return; }
+    for (const id of entries) {
+      const job = this.jobs.get(id);
+      if (job && ACTIVE.has(job.state)) continue;
+      const wt = path.join(wtRoot, id);
+      const repo = job?.project_path;
+      if (repo) await worktreeDiscard(repo, wt);
+      try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
+      if (job) job.worktree = null;
+    }
+    if (entries.length) this.log.info(`worktrees: swept ${entries.length} leftover(s)`);
   }
 
   pruneOld(keep = 500) {
@@ -196,21 +214,22 @@ export class JobManager {
 
   runningCount() { return [...this.jobs.values()].filter(j => j.state === 'running').length; }
 
-  activeForProject(project) {
-    return [...this.jobs.values()].find(j => j.project === project && ACTIVE.has(j.state));
-  }
-
-  /** Throws if a job (Claude or compose) or a synchronous compose op is active on the project. */
-  assertProjectFree(project, what) {
+  /**
+   * Compose ops need the project's containers (and checkout, for builds) to
+   * themselves. Claude jobs run in isolated worktrees and never contend, so
+   * they are deliberately NOT part of this check: a running task must never
+   * block "restart the stack" or vice versa.
+   */
+  assertComposeFree(project, what) {
     const lock = this.composeLocks.get(project);
-    if (lock) throw new Error(`refused: ${project} has a compose operation in progress (${lock}); ${what} would fight it for the working tree`);
-    const busy = this.activeForProject(project);
-    if (busy) throw new Error(`refused: ${project} already has an active ${busy.kind === 'compose_redeploy' ? 'compose redeploy' : 'Claude Code'} job (${busy.id}, ${busy.state}); one operation per project`);
+    if (lock) throw new Error(`refused: ${project} has a compose operation in progress (${lock}); ${what} would fight it`);
+    const busy = [...this.jobs.values()].find(j => j.project === project && j.kind === 'compose_redeploy' && ACTIVE.has(j.state));
+    if (busy) throw new Error(`refused: ${project} already has an active compose redeploy (${busy.id}, ${busy.state})`);
   }
 
   /** Hold a short lock while a synchronous compose op runs. */
   async withComposeLock(project, what, fn) {
-    this.assertProjectFree(project, what);
+    this.assertComposeFree(project, what);
     this.composeLocks.set(project, what);
     try { return await fn(); } finally { this.composeLocks.delete(project); }
   }
@@ -245,22 +264,21 @@ export class JobManager {
       throw new Error(`agent "${agent}" not found in ${name}/.claude/agents (available: ${setup.agents.map(a => a.name).join(', ') || 'none'})`);
     }
     if (base_branch && (!/^[A-Za-z0-9._\/-]{1,200}$/.test(base_branch) || base_branch.startsWith('-') || base_branch.includes('..'))) throw new Error('invalid base_branch');
-    this.assertProjectFree(name, 'a Claude Code job');
     if (complexity && !['low', 'normal', 'high'].includes(complexity)) throw new Error('complexity must be low, normal or high');
     const priorFailure = this.findPriorFailure(name, prompt, retry_of);
     const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure });
 
-    // Refuse a dirty tree before anything else (and before Claude is ever invoked).
-    const st = await workingTreeStatus(dir, { includeUntracked: !ov.allow_untracked, timeoutMs: 20_000 });
-    if (st.dirty) {
-      const e = new Error(`refused: ${name} has uncommitted changes (${st.entries.length} entr${st.entries.length === 1 ? 'y' : 'ies'}). Commit or stash them first.\n` + st.entries.slice(0, 20).join('\n'));
-      e.code = 'DIRTY_TREE';
-      throw e;
-    }
-    if (!currentBranchFast(dir) && mode === 'execute') {
-      // Detached HEAD is fine for plan mode; for execute we need a base to branch from.
+    // Jobs run in a disposable worktree created from committed state, so a
+    // dirty checkout never blocks a job — but uncommitted work is invisible
+    // to it, which is worth saying out loud instead of silently ignoring.
+    let dirtyNote = null;
+    try {
+      const st = await workingTreeStatus(dir, { includeUntracked: !ov.allow_untracked, timeoutMs: 20_000 });
+      if (st.dirty) dirtyNote = `${name}'s checkout has ${st.entries.length} uncommitted change(s); this job runs from committed state and cannot see them`;
+    } catch { /* advisory only */ }
+    if (mode === 'execute' && !base_branch) {
       const def = await defaultBranch(dir, ov.default_branch);
-      if (!def) throw new Error(`${name} is on a detached HEAD and no default branch could be inferred`);
+      if (!def) throw new Error(`${name} has no inferable default branch (detached HEAD, no main/master?) — pass base_branch`);
     }
 
     const limits = {
@@ -273,9 +291,9 @@ export class JobManager {
       id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
       model_selected: choice.model, tier: choice.tier, model_reason: choice.reason, retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
-      base_branch: base_branch || null, branch: null, original_branch: null, commits: null, pushed: null, pr_url: null,
+      base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
-      error: null, notes: [], pid: null, limits, setup: { claude_md: setup.claude_md, preflight: setup.preflight, agents: setup.agents.map(a => a.name) },
+      error: null, notes: dirtyNote ? [dirtyNote] : [], pid: null, limits, setup: { claude_md: setup.claude_md, preflight: setup.preflight, agents: setup.agents.map(a => a.name) },
     };
     fs.mkdirSync(this.jobDir(id), { recursive: true });
     this.jobs.set(id, job);
@@ -296,8 +314,9 @@ export class JobManager {
       job.activity = 'starting';
       this.save(job, { immediate: true });
       const runner = job.kind === 'compose_redeploy' ? this.runComposeJob(job) : this.runJob(job);
-      runner.catch(e => {
+      runner.catch(async e => {
         this.log.error(`job ${job.id} crashed: ${e.stack || e.message}`);
+        await this.removeWorktree(job).catch(() => {});
         this.finish(job, 'failed', `internal error: ${scrub(e.message)}`);
       });
     }
@@ -318,34 +337,48 @@ export class JobManager {
 
   // ---------- run ----------
   async runJob(job) {
-    const dir = job.project_path;
+    const repoDir = job.project_path;
     const ov = projectOverrides(this.cfg, job.project);
-    const remote = await hasRemote(dir);
+    const remote = await hasRemote(repoDir);
+    const wt = path.join(this.cfg.data_dir, 'worktrees', job.id);
+    fs.mkdirSync(path.dirname(wt), { recursive: true });
 
-    // Branch setup for execute mode.
+    // Every job runs in a disposable worktree: the project checkout is never
+    // touched, so its dirty state can't block a job and concurrent jobs can't
+    // collide. Execute jobs branch off the (fetched) base; plan jobs get a
+    // detached read-only snapshot.
     if (job.mode === 'execute') {
-      job.original_branch = currentBranchFast(dir);
-      const base = job.base_branch || await defaultBranch(dir, ov.default_branch);
+      const base = job.base_branch || await defaultBranch(repoDir, ov.default_branch);
       job.base_branch = base;
       let startPoint = base;
       if (remote) {
         job.activity = `fetching origin/${base}`;
         this.save(job);
-        const r = await run('git', ['fetch', '--quiet', 'origin', base], { cwd: dir, timeoutMs: 120_000 });
+        const r = await run('git', ['fetch', '--quiet', 'origin', base], { cwd: repoDir, timeoutMs: 120_000 });
         if (r.code === 0) startPoint = `origin/${base}`;
         else { job.notes.push(`fetch of origin/${base} failed; branching from local ${base}`); this.appendTranscript(job, `fetch failed: ${r.stderr.trim()}`); }
       }
-      if (!(await branchExists(dir, base)) && startPoint === base) {
+      if (startPoint === base && !(await branchExists(repoDir, base))) {
         return this.finish(job, 'failed', `base branch ${base} does not exist in ${job.project}`);
       }
       const prefix = this.cfg.claude.branch_prefix || 'bridge/';
       job.branch = `${prefix}${slugify(job.summary)}-${job.id.slice(2, 10)}`;
       try {
-        await git(['checkout', '--quiet', '-b', job.branch, startPoint], { cwd: dir, timeoutMs: 60_000 });
+        await worktreeAdd(repoDir, wt, { branch: job.branch, startPoint });
       } catch (e) {
-        return this.finish(job, 'failed', `could not create branch ${job.branch}: ${e.message}`);
+        return this.finish(job, 'failed', `could not create worktree for ${job.branch}: ${e.message}`);
       }
-      this.appendTranscript(job, `created branch ${job.branch} from ${startPoint} (was on ${job.original_branch || 'detached HEAD'})`);
+      job.worktree = wt;
+      this.appendTranscript(job, `created worktree on branch ${job.branch} from ${startPoint}`);
+    } else {
+      const ref = job.base_branch || 'HEAD';
+      try {
+        await worktreeAdd(repoDir, wt, { detach: true, ref });
+      } catch (e) {
+        return this.finish(job, 'failed', `could not create read-only worktree at ${ref}: ${e.message}`);
+      }
+      job.worktree = wt;
+      this.appendTranscript(job, `created read-only worktree at ${ref}`);
     }
 
     // Build the claude command.
@@ -391,8 +424,9 @@ export class JobManager {
 
   systemPrompt(job, { remote }) {
     const lines = [
-      `You are running unattended through the Claude Code Bridge (job ${job.id}) in the repository "${job.project}" at ${job.project_path}. Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
-      `Stay inside this repository. Never print secrets, tokens, or the contents of .env files in your output.`,
+      `You are running unattended through the Claude Code Bridge (job ${job.id}) in an isolated git worktree of the repository "${job.project}". Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
+      `This worktree contains committed state only: untracked files from the project's main checkout (local .env files, node_modules, build output) are absent. If the task needs dependencies to build or test, install them here first; if a local-only file the task needs is missing, say so in your summary instead of guessing.`,
+      `Stay inside this worktree. Never print secrets, tokens, or the contents of .env files in your output.`,
     ];
     if (job.mode === 'plan') {
       lines.push(
@@ -411,7 +445,7 @@ export class JobManager {
 
   spawnClaude(job, args) {
     return new Promise(resolve => {
-      const dir = job.project_path;
+      const dir = job.worktree || job.project_path;
       const bin = this.cfg.claude.bin || 'claude';
       const env = {
         PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, LANG: process.env.LANG || 'C.UTF-8', TERM: 'dumb',
@@ -527,8 +561,11 @@ export class JobManager {
 
   // ---------- after claude exits ----------
   async postProcess(job, { remote, abnormal }) {
-    if (job.mode !== 'execute' || !job.branch) return;
-    const dir = job.project_path;
+    if (job.mode !== 'execute' || !job.branch || !job.worktree) {
+      await this.removeWorktree(job);
+      return;
+    }
+    const dir = job.worktree; // all git work happens in the job's worktree
     try {
       // Commit anything the agent left uncommitted so nothing is lost.
       const st = await workingTreeStatus(dir, { timeoutMs: 60_000 });
@@ -549,8 +586,9 @@ export class JobManager {
       if (count === 0) {
         job.notes.push('no commits were produced; branch removed');
         this.appendTranscript(job, 'no commits on branch; removing it');
-        await this.restoreOriginal(job);
-        await run('git', ['branch', '-D', job.branch], { cwd: dir });
+        // The branch can only be deleted once no worktree has it checked out.
+        await this.removeWorktree(job);
+        await run('git', ['branch', '-D', job.branch], { cwd: job.project_path });
         job.branch = null;
         return;
       }
@@ -572,21 +610,22 @@ export class JobManager {
         job.pushed = false;
         job.notes.push(`no remote configured; ${count} commit(s) on local branch ${job.branch}`);
       }
-      await this.restoreOriginal(job);
     } catch (e) {
       job.notes.push(`post-processing error: ${scrub(e.message)}`);
       this.appendTranscript(job, `post-processing error: ${e.message}`);
     } finally {
+      await this.removeWorktree(job);
       this.save(job, { immediate: true });
     }
   }
 
-  async restoreOriginal(job) {
-    const dir = job.project_path;
-    if (!job.original_branch || job.original_branch === job.branch) return;
-    const r = await run('git', ['checkout', '--quiet', job.original_branch], { cwd: dir, timeoutMs: 60_000 });
-    if (r.code === 0) this.appendTranscript(job, `restored working tree to ${job.original_branch}`);
-    else { job.notes.push(`could not switch back to ${job.original_branch}: ${trunc(r.stderr.trim(), 200)}`); }
+  /** Remove a job's worktree (idempotent; the branch and its commits survive in the repo). */
+  async removeWorktree(job) {
+    if (!job.worktree) return;
+    const wt = job.worktree;
+    await worktreeDiscard(job.project_path, wt);
+    job.worktree = null;
+    this.appendTranscript(job, `removed worktree`);
   }
 
   async openDraftPr(job) {
@@ -639,7 +678,7 @@ export class JobManager {
     const target = resolveComposeTarget(this.cfg, project, { file, profile });
     if (target.protectedBy) throw new Error(`refused: ${target.protectedBy}. Use a terminal on the box for this stack.`);
     const svc = validateServices(services);
-    this.assertProjectFree(target.project, 'a compose redeploy');
+    this.assertComposeFree(target.project, 'a compose redeploy');
     const id = newJobId();
     const job = {
       id, kind: 'compose_redeploy', project: target.project, project_path: target.dir, mode: 'redeploy', agent: null,
@@ -738,32 +777,29 @@ export class JobManager {
     }
     const cleanup = [];
     if (job.mode === 'execute' && job.branch) {
-      const dir = job.project_path;
       try {
-        if (keep_branch) {
-          const st = await workingTreeStatus(dir, { timeoutMs: 60_000 });
+        if (keep_branch && job.worktree) {
+          const st = await workingTreeStatus(job.worktree, { timeoutMs: 60_000 });
           if (st.dirty) {
-            await git(['add', '-A'], { cwd: dir });
-            await git(['-c', `user.name=${authorName(this.cfg)}`, '-c', `user.email=${authorEmail(this.cfg)}`, 'commit', '--quiet', '-m', `chore(bridge): partial work from cancelled job ${job.id}`], { cwd: dir });
+            await git(['add', '-A'], { cwd: job.worktree });
+            await git(['-c', `user.name=${authorName(this.cfg)}`, '-c', `user.email=${authorEmail(this.cfg)}`, 'commit', '--quiet', '-m', `chore(bridge): partial work from cancelled job ${job.id}`], { cwd: job.worktree });
             cleanup.push('committed partial work');
           }
           cleanup.push(`kept branch ${job.branch}`);
+          await this.removeWorktree(job);
         } else {
-          // Tree was clean when the job started, so discarding everything only drops agent output.
-          await run('git', ['reset', '--hard', '--quiet'], { cwd: dir, timeoutMs: 60_000 });
-          await run('git', ['clean', '-fdq'], { cwd: dir, timeoutMs: 60_000 });
-          cleanup.push('discarded uncommitted changes');
-        }
-        await this.restoreOriginal(job);
-        if (!keep_branch) {
-          const r = await run('git', ['branch', '-D', job.branch], { cwd: dir });
+          // Uncommitted agent output lives only in the worktree; removing it discards nothing else.
+          await this.removeWorktree(job);
+          const r = await run('git', ['branch', '-D', job.branch], { cwd: job.project_path });
           if (r.code === 0) { cleanup.push(`deleted branch ${job.branch}`); job.branch = null; }
           else cleanup.push(`could not delete branch ${job.branch}: ${trunc(r.stderr.trim(), 200)}`);
+          cleanup.push('discarded worktree with uncommitted changes');
         }
       } catch (e) {
         cleanup.push(`cleanup error: ${scrub(e.message)}`);
       }
     }
+    await this.removeWorktree(job).catch(() => {}); // plan-mode worktrees
     job.notes.push(...cleanup);
     this.finish(job, 'cancelled', 'cancelled by request');
     return { job_id: id, state: 'cancelled', cleanup };

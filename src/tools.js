@@ -1,6 +1,10 @@
 // MCP tool surface. Every handler's output passes through the scrubber before it leaves.
+import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import { scrub, scrubDeep } from './scrub.js';
+import { resolveProjectDir } from './paths.js';
+import { git, run, workingTreeStatus, currentBranchFast, hasRemote } from './git.js';
 import { cloneProject, listAvailableRepos } from './clone.js';
 import { resolveComposeTarget, composeStatus, composeLogs, compose, validateServices, composeConfig, isProtected, protectedList } from './compose.js';
 
@@ -40,7 +44,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     if (!verbose) {
       // Compact by default: this result lands in the chat context verbatim and is often called more than once.
       out = out.map(p => ({
-        name: p.name, current_branch: p.current_branch, default_branch: p.default_branch, remote: p.remote, dirty: p.dirty,
+        name: p.name, note: p.note || undefined, current_branch: p.current_branch, default_branch: p.default_branch, remote: p.remote, dirty: p.dirty,
         has_claude_setup: p.has_claude_setup, claude_md: p.claude_md || undefined, preflight: p.preflight || undefined,
         agents: p.agents.length ? p.agents.map(a => a.name) : undefined,
         compose: p.compose.length ? p.compose.map(c => c.file) : undefined,
@@ -81,7 +85,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
 
   server.registerTool('start_task', {
     title: 'Start a Claude Code task',
-    description: `Dispatch a natural-language task to Claude Code (headless) in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Refused if the working tree is dirty or the project already has an active job. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}).`,
+    description: `Dispatch a natural-language task to Claude Code (headless) in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Every job runs in a disposable git worktree: the project checkout is never touched, a dirty checkout does not block anything (its uncommitted changes are simply invisible to the job), and multiple jobs may run on one project. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}).`,
     inputSchema: {
       project: z.string().describe('Project name as shown by list_projects'),
       prompt: z.string().describe('What to do, in natural language'),
@@ -128,6 +132,37 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     description: 'Terminate a queued or running job. By default discards uncommitted agent changes, restores the original branch and deletes the job branch so nothing is orphaned; pass keep_branch=true to commit partial work and keep the branch instead.',
     inputSchema: { job_id: z.string(), keep_branch: z.boolean().optional() },
   }, wrap(async args => ok(await jobs.cancel(args.job_id, args)), 'cancel_task'));
+
+  server.registerTool('update_checkout', {
+    title: 'Update a project checkout (fast-forward only)',
+    description: 'Bring a project\'s checked-out branch up to date with its remote: git fetch origin <branch> + merge --ff-only. This is the deploy primitive for stacks that build from their checkout (see each project\'s note in list_projects): merge the PR on the host, update_checkout, then compose_redeploy. Never rewrites history and never touches uncommitted files. Refuses when the checkout is dirty (someone\'s uncommitted work is in the live checkout — it lists the files so the human can decide), detached, without a remote, or when the update is not a fast-forward.',
+    inputSchema: {
+      project: z.string().describe('Project name as shown by list_projects'),
+      branch: z.string().optional().describe('Safety check only: must equal the currently checked-out branch. Omit to update whatever branch is checked out.'),
+    },
+  }, wrap(async ({ project, branch }) => {
+    const dir = resolveProjectDir(cfg, project);
+    const name = path.relative(fs.realpathSync(cfg.workspace_root), dir);
+    const current = currentBranchFast(dir);
+    if (!current) throw new Error(`refused: ${name} is on a detached HEAD; check out a branch on the box first`);
+    if (branch && branch !== current) throw new Error(`refused: ${name} has ${current} checked out, not ${branch}. update_checkout only fast-forwards the checked-out branch.`);
+    if (!(await hasRemote(dir))) throw new Error(`refused: ${name} has no origin remote to update from`);
+    const st = await workingTreeStatus(dir, { timeoutMs: 30_000 });
+    if (st.dirty) {
+      throw new Error(`refused: ${name} has ${st.entries.length} uncommitted change(s) in its live checkout — updating around them risks someone's in-progress work. A human should commit, stash or discard these first:\n` + st.entries.slice(0, 20).join('\n'));
+    }
+    return jobs.withComposeLock(name, 'update_checkout', async () => {
+      const before = (await git(['rev-parse', 'HEAD'], { cwd: dir })).trim();
+      await git(['fetch', '--quiet', 'origin', current], { cwd: dir, timeoutMs: 180_000 });
+      const r = await run('git', ['merge', '--ff-only', '--quiet', `origin/${current}`], { cwd: dir, timeoutMs: 60_000 });
+      if (r.code !== 0) throw new Error(`not a fast-forward: local ${current} has diverged from origin/${current} (${r.stderr.trim().split('\n')[0] || 'merge refused'}). A human needs to reconcile on the box.`);
+      const after = (await git(['rev-parse', 'HEAD'], { cwd: dir })).trim();
+      const count = before === after ? 0 : Number((await git(['rev-list', '--count', `${before}..${after}`], { cwd: dir })).trim());
+      const summary = count === 0 ? `${name} ${current} already up to date at ${after.slice(0, 8)}`
+        : `${name} ${current} fast-forwarded ${before.slice(0, 8)} -> ${after.slice(0, 8)} (${count} commit${count === 1 ? '' : 's'}). If a Compose stack builds from this checkout, follow with compose_redeploy to ship it.`;
+      return ok({ project: name, branch: current, before, after, commits: count, up_to_date: count === 0 }, summary);
+    });
+  }, 'update_checkout'));
 
   server.registerTool('list_jobs', {
     title: 'List recent jobs',

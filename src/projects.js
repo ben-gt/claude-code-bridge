@@ -100,6 +100,7 @@ export async function describeProject(cfg, name, dir, { withStatus = true } = {}
   }
   return {
     name,
+    note: ov.note || undefined,
     path: dir,
     vcs: 'git',
     current_branch: currentBranchFast(dir) ?? '(detached)',

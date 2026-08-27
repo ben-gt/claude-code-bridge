@@ -162,6 +162,23 @@ export async function branchExists(dir, branch) {
   return r.code === 0;
 }
 
+/** Create a worktree. { branch, startPoint } makes a new branch; { detach, ref } gives a read-only snapshot. */
+export async function worktreeAdd(repoDir, wtPath, { branch, startPoint, detach, ref } = {}) {
+  const args = ['worktree', 'add', '--quiet'];
+  if (branch) args.push('-b', branch, wtPath, startPoint);
+  else args.push('--detach', wtPath, ref || 'HEAD');
+  await git(args, { cwd: repoDir, timeoutMs: 120_000 });
+}
+
+/** Remove a worktree registration and its directory (best-effort, idempotent). */
+export async function worktreeDiscard(repoDir, wtPath) {
+  const r = await run('git', ['worktree', 'remove', '--force', wtPath], { cwd: repoDir, timeoutMs: 60_000 }).catch(() => ({ code: -1 }));
+  if (r.code !== 0) {
+    try { fs.rmSync(wtPath, { recursive: true, force: true }); } catch { /* ignore */ }
+    await run('git', ['worktree', 'prune'], { cwd: repoDir }).catch(() => {});
+  }
+}
+
 /** Parse host/owner/repo out of an https or ssh remote URL. */
 export function parseRemote(url) {
   if (!url) return null;

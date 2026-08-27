@@ -83,6 +83,7 @@ async function main() {
     const server = new McpServer({ name: 'claude-code-bridge', version: VERSION }, { instructions: [
       `Claude Code Bridge: dispatches engineering tasks to Claude Code (headless) against repositories under ${cfg.workspace_root}, and clones new ones.`,
       'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Nothing is ever merged automatically.',
+      'Jobs run in disposable git worktrees: a dirty checkout never blocks a job and jobs never touch the checkout. Deploying a stack that builds from its checkout: merge the PR, update_checkout, compose_redeploy (projects carry a note in list_projects when this applies).',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
     ].join('\n') });
     registerTools(server, { cfg, projects, jobs, log });

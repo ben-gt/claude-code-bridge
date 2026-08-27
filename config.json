@@ -15,8 +15,8 @@
   },
   "limits": {
     "max_concurrent_jobs": 2,
-    "job_timeout_minutes": 20,
-    "max_cost_usd": 5,
+    "job_timeout_minutes": 30,
+    "max_cost_usd": 20,
     "list_jobs_max": 50
   },
   "clone": {
@@ -45,6 +45,12 @@
       "job_timeout_minutes": 30,
       "max_cost_usd": 8,
       "tier": "default"
+    },
+    "beyond-ims-website": {
+      "note": "PRODUCTION deploy checkout: the live Beyond IMS website Docker stack (Next.js web + Cloudflare tunnel) builds from THIS directory. Publishing a merged change = update_checkout here, then compose_redeploy. For development tasks use bnd-ims-website (clean working copy of the same repo)."
+    },
+    "bnd-ims-website": {
+      "note": "Clean working copy of Beyond-One-AU/beyond-ims-website for development tasks (start_task here). Production serves from the beyond-ims-website checkout — deploy there after merging."
     }
   },
   "models": {
@@ -53,14 +59,14 @@
     "tiers": {
       "default": {
         "model": "claude-opus-5",
-        "max_cost_usd": 5,
+        "max_cost_usd": 20,
         "aliases": [
           "opus"
         ]
       },
       "complex": {
         "model": "claude-fable-5",
-        "max_cost_usd": 12,
+        "max_cost_usd": 20,
         "aliases": [
           "fable"
         ]
