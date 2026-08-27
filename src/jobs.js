@@ -15,6 +15,8 @@ import { resolveComposeTarget, composeConfig, composeStatus, composeStream, vali
 
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
 const ACTIVE = new Set(['queued', 'running']);
+// Most recent activity steps carried back by a long poll (see waitForChange).
+const TRAIL_MAX = 12;
 
 function newJobId() {
   return `j_${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
@@ -139,24 +141,45 @@ export class JobManager {
       }));
   }
 
-  /** Resolve when the job's state or activity changes, or after timeoutMs. */
+  /**
+   * Block until the job finishes, or timeoutMs elapses. Returns the distinct
+   * activity steps observed while waiting.
+   *
+   * This used to resolve on any `activity` change too — which sounds like a
+   * long poll and isn't: activity ticks over on every tool the agent uses, so
+   * a 20s wait typically returned in a second or two. Measured on the calling
+   * side that came to ~18 get_task_status calls per job, and each one is a
+   * full model round-trip that resends the entire conversation. So only a
+   * TERMINAL state wakes this early now; progress is collected into the trail
+   * and reported in one go, which reads better anyway ("installed deps, ran
+   * tests, opened PR") than a single stale snapshot per call.
+   */
   waitForChange(id, timeoutMs) {
     const j = this.get(id);
-    if (!ACTIVE.has(j.state)) return Promise.resolve(false);
-    const snap = `${j.state}|${j.activity}|${j.branch}|${j.pr_url}`;
+    if (!ACTIVE.has(j.state)) return Promise.resolve([]);
+    const trail = [];
+    let last = j.activity;
     return new Promise(resolve => {
       const started = Date.now();
       const tick = () => {
         const cur = this.jobs.get(id);
-        if (!cur || `${cur.state}|${cur.activity}|${cur.branch}|${cur.pr_url}` !== snap || !ACTIVE.has(cur.state)) return resolve(true);
-        if (Date.now() - started >= timeoutMs) return resolve(false);
+        if (!cur) return resolve(trail);
+        if (cur.activity && cur.activity !== last) {
+          last = cur.activity;
+          // Cap the trail: a chatty job must not turn one poll into a wall of
+          // text, which is the cost we are here to remove. Keep the newest.
+          trail.push(`+${elapsedSeconds(cur)}s ${cur.activity}`);
+          if (trail.length > TRAIL_MAX) trail.splice(0, trail.length - TRAIL_MAX);
+        }
+        if (!ACTIVE.has(cur.state)) return resolve(trail);
+        if (Date.now() - started >= timeoutMs) return resolve(trail);
         setTimeout(tick, 500);
       };
       setTimeout(tick, 500);
     });
   }
 
-  status(id) {
+  status(id, { trail } = {}) {
     const j = this.get(id);
     const active = ACTIVE.has(j.state);
     if (active) {
@@ -167,7 +190,8 @@ export class JobManager {
         model: j.model || j.model_selected || undefined, cost_usd: j.cost_usd ?? undefined,
         queue_position: j.state === 'queued' ? this.queuePosition(j.id) : undefined,
         compose_steps: j.compose?.steps?.length ? j.compose.steps.map(s => `${s.name}=${s.state}`).join(', ') : undefined,
-        hint: 'still running — call again with wait_seconds (default 20) to long-poll instead of spinning; get_task_log for detail',
+        steps_while_waiting: trail && trail.length ? trail : undefined,
+        hint: 'still running — this call already waited; just call again to keep waiting (it blocks until the job ends or wait_seconds runs out). Do not poll in a tight loop: every call re-sends the whole conversation to the model. get_task_log for detail.',
       });
     }
     return scrubDeep({

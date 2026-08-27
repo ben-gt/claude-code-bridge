@@ -105,12 +105,12 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
 
   server.registerTool('get_task_status', {
     title: 'Get task status',
-    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, model used + tier + why, cost, and the final result or plan text when finished. While a job is running this LONG-POLLS: it waits up to wait_seconds (default 20, max 50) for the state/activity to change before answering, so call it once per check rather than repeatedly. Running jobs return a lean payload; the full record comes when the job ends. For compose redeploy jobs: steps and service state before/after.',
-    inputSchema: { job_id: z.string(), wait_seconds: z.number().min(0).max(50).optional().describe('Seconds to wait for a change while the job is active (default 20; 0 = answer immediately)') },
+    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, model used + tier + why, cost, and the final result or plan text when finished. While a job is running this BLOCKS until the job actually ends, or until wait_seconds elapses (default 120, max 600) — it does NOT return early on every progress tick. Progress observed while waiting comes back as steps_while_waiting, so one call reports several steps. Call it once and wait; a tight poll loop is expensive because every call re-sends the whole conversation to the model. Running jobs return a lean payload; the full record comes when the job ends. For compose redeploy jobs: steps and service state before/after.',
+    inputSchema: { job_id: z.string(), wait_seconds: z.number().min(0).max(600).optional().describe('Seconds to block waiting for the job to END (default 120, max 600; 0 = answer immediately without waiting)') },
   }, wrap(async ({ job_id, wait_seconds }) => {
-    const w = wait_seconds === undefined ? 20 : wait_seconds;
-    if (w > 0) await jobs.waitForChange(job_id, w * 1000);
-    return ok(jobs.status(job_id));
+    const w = wait_seconds === undefined ? 120 : wait_seconds;
+    const trail = w > 0 ? await jobs.waitForChange(job_id, w * 1000) : [];
+    return ok(jobs.status(job_id, { trail }));
   }));
 
   server.registerTool('get_task_log', {
