@@ -50,15 +50,32 @@ export const DEFAULTS = {
     branch_prefix: 'bridge/',
     // Commit author used for any leftover-work commit the bridge makes itself.
     commit_author: 'Claude Code Bridge <claude-code-bridge@localhost>',
+    // Model for subagents a job spawns. Subagents otherwise INHERIT the parent
+    // model, so a codebase sweep under an Opus job runs at Opus latency and
+    // Opus prices to do grep-shaped work. CLAUDE_CODE_SUBAGENT_MODEL overrides
+    // both the Agent tool's model parameter and any agent frontmatter.
+    // null/'' leaves Claude Code's own behaviour alone.
+    subagent_model: 'claude-haiku-4-5',
+    // Background/non-essential model calls buy an unattended job nothing —
+    // no human is reading them. Sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
+    disable_nonessential_traffic: true,
   },
   // Model tiers. Names are policy; ids were confirmed against Claude Code 2.1.240
   // (`--model opus` -> claude-opus-5, `--model fable` -> claude-fable-5). Change here, not in code.
   models: {
     default_tier: 'default',
     complex_tier: 'complex',
+    // Tier used when the caller passes complexity "low" — lookups, renames,
+    // status checks, grep-shaped questions.
+    fast_tier: 'fast',
+    // Effort for a tier that does not name one. Claude Code's own default is
+    // 'high' on current models, and on routine work the thinking tokens
+    // dominate wall-clock time, so 'high' everywhere is the slow default.
+    default_effort: 'medium',
     tiers: {
-      default: { model: 'claude-opus-5', max_cost_usd: 5, aliases: ['opus'] },
-      complex: { model: 'claude-fable-5', max_cost_usd: 12, aliases: ['fable'] },
+      fast: { model: 'claude-haiku-4-5', max_cost_usd: 2, aliases: ['haiku', 'fast'], effort: 'low' },
+      default: { model: 'claude-opus-5', max_cost_usd: 5, aliases: ['opus'], effort: 'medium' },
+      complex: { model: 'claude-fable-5', max_cost_usd: 12, aliases: ['fable'], effort: 'high' },
     },
     // Crude, explainable escalation triggers — expected to be tuned.
     escalation: {

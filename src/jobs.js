@@ -10,7 +10,7 @@ import { detectClaudeSetup } from './projects.js';
 import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
-import { selectModel } from './models.js';
+import { selectModel, EFFORT_LEVELS } from './models.js';
 import { resolveComposeTarget, composeConfig, composeStatus, composeStream, validateServices, killGroup as composeKill, isProtected } from './compose.js';
 
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
@@ -202,6 +202,7 @@ export class JobManager {
       commits: j.commits ?? undefined, pushed: j.pushed ?? undefined, pr_url: j.pr_url || undefined,
       session_id: j.session_id || undefined,
       model: j.model || j.model_selected || undefined, model_selected: j.model_selected || undefined, tier: j.tier || undefined, model_reason: j.model_reason || undefined,
+      effort: j.effort_selected || undefined, effort_reason: j.effort_reason || undefined,
       compose: j.compose || undefined,
       cost_usd: j.cost_usd ?? undefined, usage: j.usage || undefined, num_turns: j.num_turns ?? undefined,
       limits: j.limits,
@@ -277,7 +278,7 @@ export class JobManager {
   }
 
   // ---------- start ----------
-  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, retry_of }) {
+  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of }) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) throw new Error('prompt is required');
     if (!['plan', 'execute'].includes(mode)) throw new Error(`mode must be "plan" or "execute" (got ${mode})`);
     const dir = resolveProjectDir(this.cfg, project);
@@ -289,8 +290,9 @@ export class JobManager {
     }
     if (base_branch && (!/^[A-Za-z0-9._\/-]{1,200}$/.test(base_branch) || base_branch.startsWith('-') || base_branch.includes('..'))) throw new Error('invalid base_branch');
     if (complexity && !['low', 'normal', 'high'].includes(complexity)) throw new Error('complexity must be low, normal or high');
+    if (effort && !EFFORT_LEVELS.includes(effort)) throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
     const priorFailure = this.findPriorFailure(name, prompt, retry_of);
-    const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure });
+    const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure, explicitEffort: effort });
 
     // Jobs run in a disposable worktree created from committed state, so a
     // dirty checkout never blocks a job — but uncommitted work is invisible
@@ -313,7 +315,8 @@ export class JobManager {
     const id = newJobId();
     const job = {
       id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
-      model_selected: choice.model, tier: choice.tier, model_reason: choice.reason, retry_of: priorFailure?.id || null,
+      model_selected: choice.model, tier: choice.tier, model_reason: choice.reason,
+      effort_selected: choice.effort || null, effort_reason: choice.effort_reason || null, retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
@@ -324,7 +327,8 @@ export class JobManager {
     this.save(job, { immediate: true });
     this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode}${agent ? ` agent=${agent}` : ''} model=${choice.model} tier=${choice.tier} (${choice.reason})`);
     setImmediate(() => this.pump());
-    return { job_id: id, state: job.state, project: name, mode, model: choice.model, tier: choice.tier, model_reason: choice.reason, queue_position: this.queuePosition(id), limits };
+    return { job_id: id, state: job.state, project: name, mode, model: choice.model, tier: choice.tier, model_reason: choice.reason,
+      effort: choice.effort || undefined, effort_reason: choice.effort_reason || undefined, queue_position: this.queuePosition(id), limits };
   }
 
   /** Start queued jobs while capacity allows. */
@@ -441,6 +445,10 @@ export class JobManager {
     }
     if (job.agent) args.push('--agent', job.agent);
     if (job.model_selected) args.push('--model', job.model_selected);
+    // Effort drives adaptive reasoning, and Claude Code defaults it to 'high'.
+    // On routine work the thinking tokens dominate wall-clock time, so this is
+    // the single biggest latency lever the bridge has — bigger than the model.
+    if (job.effort_selected) args.push('--effort', job.effort_selected);
     args.push('--append-system-prompt', this.systemPrompt(job, { remote }));
     if (Array.isArray(c.extra_args)) args.push(...c.extra_args);
     return args;
@@ -479,6 +487,14 @@ export class JobManager {
         GIT_TERMINAL_PROMPT: '0',
         CLAUDE_CODE_BRIDGE_JOB: job.id,
       };
+      // Subagents INHERIT the parent model unless told otherwise, so a
+      // codebase sweep under an Opus job does grep-shaped work at Opus latency.
+      // This env var beats both the Agent tool's model parameter and agent
+      // frontmatter, which is what makes it reliable here.
+      if (this.cfg.claude.subagent_model) env.CLAUDE_CODE_SUBAGENT_MODEL = this.cfg.claude.subagent_model;
+      // Nobody is watching an unattended job, so background/non-essential
+      // model calls are pure added latency and spend.
+      if (this.cfg.claude.disable_nonessential_traffic) env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
       const streamFile = fs.openSync(path.join(this.jobDir(job.id), 'stream.jsonl'), 'a');
       let child;
       try {

@@ -1,73 +1,113 @@
 {
   "_comment": "Copy to config.json (or config.local.json for machine-local tweaks, which is gitignored and merged on top). Every key is optional; defaults live in src/config.js.",
-
   "workspace_root": "~/code",
   "data_dir": "~/.local/share/claude-code-bridge",
-
   "server": {
     "host": "0.0.0.0",
     "port": 4010,
     "token_file": "~/.config/claude-code-bridge/token"
   },
-
   "discovery": {
     "_comment": "depth 1 = direct children of workspace_root. Raise it if you nest by owner (~/code/<owner>/<repo>). Directory names in exclusions are skipped at any depth; names starting with '.' are always skipped.",
     "depth": 1,
-    "exclusions": ["node_modules", "claude-code-bridge", "archive"]
+    "exclusions": [
+      "node_modules",
+      "claude-code-bridge",
+      "archive"
+    ]
   },
-
   "limits": {
     "max_concurrent_jobs": 2,
     "job_timeout_minutes": 20,
     "max_cost_usd": 5,
     "list_jobs_max": 50
   },
-
   "clone": {
-    "_comment": "hosts: which git hosts list_available_repos / draft-PR creation talk to. Credentials come from `git credential fill` (your git credential helper) — never from this file. type: github | gitea | gitlab. api_base overrides the default API URL.",
+    "_comment": "hosts: which git hosts list_available_repos / draft-PR creation talk to. Credentials come from `git credential fill` (your git credential helper) \u2014 never from this file. type: github | gitea | gitlab. api_base overrides the default API URL.",
     "depth": 1,
     "timeout_seconds": 600,
     "max_size_mb": 2048,
     "hosts": [
-      { "host": "github.com", "type": "github" },
-      { "host": "git.example.com", "type": "gitea" },
-      { "host": "gitlab.example.com", "type": "gitlab", "api_base": "https://gitlab.example.com/api/v4" }
+      {
+        "host": "github.com",
+        "type": "github"
+      },
+      {
+        "host": "git.example.com",
+        "type": "gitea"
+      },
+      {
+        "host": "gitlab.example.com",
+        "type": "gitlab",
+        "api_base": "https://gitlab.example.com/api/v4"
+      }
     ]
   },
-
   "claude": {
-    "_comment": "bin: claude executable (PATH or absolute). extra_args: appended verbatim to every invocation. Model choice lives under models.",
+    "_comment": "bin: claude executable (PATH or absolute). extra_args: appended verbatim to every invocation, AFTER the flags the bridge builds \u2014 so do NOT put --effort or --model here, they would silently override models.tiers.*.effort and the tier model. Model and effort choice live under models.",
     "bin": "claude",
-    "extra_args": ["--effort", "high"],
+    "extra_args": [],
     "branch_prefix": "bridge/",
-    "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
+    "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>",
+    "subagent_model": "claude-haiku-4-5",
+    "disable_nonessential_traffic": true
   },
-
   "models": {
-    "_comment": "Tier names are policy; model ids must be ones the installed Claude Code accepts (confirmed for 2.1.240: claude-opus-5, claude-fable-5). An unavailable model fails the job loudly — no fallback. Escalation triggers are crude on purpose and expected to be tuned.",
+    "_comment": "Tier names are policy; model ids must be ones the installed Claude Code accepts (confirmed for 2.1.251: claude-opus-5, claude-fable-5, claude-haiku-4-5). An unavailable model fails the job loudly - no fallback. Each tier may name an effort level (low|medium|high|xhigh|max); Claude Code's own default is high, and on routine work thinking tokens dominate wall-clock time, so high everywhere is the slow default. Escalation triggers are crude on purpose and expected to be tuned; complexity \"low\" de-escalates to fast_tier.",
     "default_tier": "default",
     "complex_tier": "complex",
     "tiers": {
-      "default": { "model": "claude-opus-5", "max_cost_usd": 5, "aliases": ["opus"] },
-      "complex": { "model": "claude-fable-5", "max_cost_usd": 12, "aliases": ["fable"] }
+      "fast": {
+        "model": "claude-haiku-4-5",
+        "max_cost_usd": 2,
+        "aliases": [
+          "haiku",
+          "fast"
+        ],
+        "effort": "low"
+      },
+      "default": {
+        "model": "claude-opus-5",
+        "max_cost_usd": 5,
+        "aliases": [
+          "opus"
+        ],
+        "effort": "medium"
+      },
+      "complex": {
+        "model": "claude-fable-5",
+        "max_cost_usd": 12,
+        "aliases": [
+          "fable"
+        ],
+        "effort": "high"
+      }
     },
     "escalation": {
-      "complex_agents": ["system-architect", "product-intent-guardian"],
+      "complex_agents": [
+        "system-architect",
+        "product-intent-guardian"
+      ],
       "prompt_length_chars": 2500,
       "file_references": 6,
       "plan_without_claude_setup": true,
       "retry_after_failure": true
-    }
+    },
+    "fast_tier": "fast",
+    "default_effort": "medium"
   },
-
   "compose": {
     "_comment": "protected: project directory names OR compose project names the bridge refuses to restart/stop/up/redeploy (status/logs still work). Keep the stack serving the chat UI and any other MCP servers here. Remove an entry to opt out.",
-    "protected": ["openui", "form-submissions", "dms-v3-form-submissions", "claude-code-bridge"],
+    "protected": [
+      "openui",
+      "form-submissions",
+      "dms-v3-form-submissions",
+      "claude-code-bridge"
+    ],
     "redeploy_timeout_minutes": 15,
     "restart_timeout_seconds": 180,
     "logs_default_lines": 200
   },
-
   "projects": {
     "_comment": "Per-project overrides keyed by directory name. default_branch: use when it can't be inferred. allow_untracked: don't count untracked files as a dirty tree. tier: default model tier for this project (escalation can still raise it).",
     "my-app": {

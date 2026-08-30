@@ -95,12 +95,13 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       max_cost_usd: z.number().positive().optional().describe('Override the cost ceiling for this job (default is per model tier)'),
       timeout_minutes: z.number().positive().max(180).optional().describe('Override the hard timeout for this job'),
       model: z.string().optional().describe(`Override model selection: a tier name (${Object.keys(cfg.models?.tiers || {}).join(', ')}), a configured model id/alias, or any model string. Omit to let the bridge choose (default tier unless an escalation trigger fires). Always honoured, up or down.`),
-      complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier'),
+      complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier (slower, more capable). "low" DE-escalates to the fast tier and low effort — use it for lookups, renames, status checks and other grep-shaped work, where it is markedly faster and cheaper.'),
+      effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Reasoning effort for this job. Defaults come from the chosen tier. Effort drives adaptive reasoning and is usually the biggest lever on how long a job takes — lower it for scoped, well-specified tasks; raise it for genuinely hard ones.'),
       retry_of: z.string().optional().describe('job_id of a previous failed attempt; retries escalate automatically'),
     },
   }, wrap(async args => {
     const r = await jobs.start(args);
-    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}). Poll get_task_status with this job_id.`);
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.effort ? `; effort ${r.effort} — ${r.effort_reason}` : ''}). Poll get_task_status with this job_id.`);
   }, 'start_task'));
 
   server.registerTool('get_task_status', {
