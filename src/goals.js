@@ -29,9 +29,10 @@ function newId() {
 }
 
 export class GoalManager {
-  constructor(cfg, { log = console } = {}) {
+  constructor(cfg, { log = console, notify = null } = {}) {
     this.cfg = cfg;
     this.log = log;
+    this.notify = notify;
     this.dir = path.join(cfg.data_dir, 'goals');
     fs.mkdirSync(this.dir, { recursive: true });
     this.goals = new Map();
@@ -182,7 +183,9 @@ export class GoalManager {
     g.state = 'completed';
     g.finished_at = nowIso();
     this.save(g);
-    this.log.info(`goal ${g.id} completed: ${jobs.length} job(s), $${this.spent(goalId, jobsById).toFixed(2)}`);
+    const spent = this.spent(goalId, jobsById);
+    this.log.info(`goal ${g.id} completed: ${jobs.length} job(s), $${spent.toFixed(2)}`);
+    try { this.notify?.goalFinished(g, { counts: this.status(goalId, jobsById).counts, spent }); } catch { /* never fail on bookkeeping */ }
   }
 
   cancel(goalId) {

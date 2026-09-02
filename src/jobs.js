@@ -42,9 +42,10 @@ function pidAlive(pid) {
 }
 
 export class JobManager {
-  constructor(cfg, projectIndex, { log = console, goals = null } = {}) {
+  constructor(cfg, projectIndex, { log = console, goals = null, notify = null } = {}) {
     this.cfg = cfg;
     this.goals = goals;
+    this.notify = notify;
     this.projects = projectIndex;
     this.log = log;
     this.jobsDir = path.join(cfg.data_dir, 'jobs');
@@ -240,6 +241,19 @@ export class JobManager {
 
   runningCount() { return [...this.jobs.values()].filter(j => j.state === 'running').length; }
 
+  /** Name of the first predecessor that has not finished yet, or null when the
+   *  job is free to run. A predecessor that FAILED still counts as finished —
+   *  the dependent child is told about it through the blackboard and can decide
+   *  what to do, which is better than silently stranding it forever. */
+  blockedBy(job) {
+    for (const id of job.depends_on || []) {
+      const dep = this.jobs.get(id);
+      if (!dep) return `${id} (unknown job)`;
+      if (dep.state === 'queued' || dep.state === 'running') return `${dep.project} (${id})`;
+    }
+    return null;
+  }
+
   /**
    * Compose ops need the project's containers (and checkout, for builds) to
    * themselves. Claude jobs run in isolated worktrees and never contend, so
@@ -290,7 +304,7 @@ export class JobManager {
   }
 
   // ---------- start ----------
-  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of, goal_id }) {
+  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of, goal_id, depends_on }) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) throw new Error('prompt is required');
     if (!['plan', 'execute'].includes(mode)) throw new Error(`mode must be "plan" or "execute" (got ${mode})`);
     const dir = resolveProjectDir(this.cfg, project);
@@ -306,6 +320,7 @@ export class JobManager {
     // The goal budget is checked BEFORE dispatch. Checking after would mean
     // discovering the ceiling by exceeding it, which for a fan-out is the
     // expensive way round.
+    if (depends_on?.length && !goal_id) throw new Error('depends_on is only meaningful inside a goal');
     if (goal_id) {
       if (!this.goals) throw new Error('goals are not enabled on this bridge');
       const gate = this.goals.canDispatch(goal_id, this.jobs);
@@ -337,7 +352,7 @@ export class JobManager {
       id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
       model_selected: choice.model, tier: choice.tier, model_reason: choice.reason,
       effort_selected: choice.effort || null, effort_reason: choice.effort_reason || null,
-      goal_id: goal_id || null, retry_of: priorFailure?.id || null,
+      goal_id: goal_id || null, depends_on: depends_on?.length ? [...depends_on] : null, retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
@@ -359,10 +374,16 @@ export class JobManager {
     const queued = [...this.jobs.values()].filter(j => j.state === 'queued').sort((a, b) => a.created_at.localeCompare(b.created_at));
     for (const job of queued) {
       if (this.runningCount() >= cap) break;
+      // A child with unmet predecessors stays queued. It is skipped, not
+      // broken out of: a later job whose dependencies ARE met should still
+      // start, otherwise one slow predecessor stalls the whole fan-out.
+      const block = this.blockedBy(job);
+      if (block) { job.activity = `waiting on ${block}`; continue; }
       job.state = 'running';
       job.started_at = nowIso();
       job.activity = 'starting';
       this.save(job, { immediate: true });
+      this.notify?.jobStarted(job);
       const runner = job.kind === 'compose_redeploy' ? this.runComposeJob(job) : this.runJob(job);
       runner.catch(async e => {
         this.log.error(`job ${job.id} crashed: ${e.stack || e.message}`);
@@ -384,6 +405,7 @@ export class JobManager {
     this.appendTranscript(job, `== job ${state}${error ? `: ${error}` : ''}`);
     // A child reports to the blackboard however it ended. A failure is a
     // finding too — the next child should not spend money rediscovering it.
+    this.notify?.jobFinished(job);
     if (job.goal_id && this.goals) {
       try {
         this.goals.appendFinding(job.goal_id, { job, text: job.result_text || job.error || '' });

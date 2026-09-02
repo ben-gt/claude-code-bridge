@@ -21,7 +21,7 @@ function fail(err) {
 }
 const wrap = fn => async args => { try { return await fn(args ?? {}); } catch (e) { return fail(e); } };
 
-export function registerTools(server, { cfg, projects, jobs, goals, log }) {
+export function registerTools(server, { cfg, projects, jobs, goals, notify, log }) {
   // Log every tool call (name, outcome, duration) — never the arguments, which may carry prompts/paths.
   const origRegister = server.registerTool.bind(server);
   server.registerTool = (name, config, handler) => origRegister(name, config, async (args, extra) => {
@@ -119,15 +119,32 @@ export function registerTools(server, { cfg, projects, jobs, goals, log }) {
         agent: z.string().optional(),
         base_branch: z.string().optional(),
         max_cost_usd: z.number().positive().optional(),
+        depends_on: z.array(z.number().int().min(0)).optional().describe('Indexes of earlier entries in this array that must finish first. Use it when a child needs an earlier one\'s findings — it waits, then starts with those findings already on the record. A failed predecessor still releases it.'),
       })).min(1).max(12).describe('One entry per project. Ordered — earlier children record findings the later ones read.'),
       budget_usd: z.number().positive().optional().describe(`Ceiling for the WHOLE goal, not per job (default $${cfg.goals?.budget_usd ?? 25}). Dispatch stops once it is spent.`),
     },
   }, wrap(async ({ objective, jobs: children, budget_usd }) => {
     const goal = goals.create({ objective, budget_usd });
+    // Announced before the children are dispatched, so the channel reads in the
+    // order things actually happened rather than showing a goal appearing after
+    // its own first job started.
+    notify?.goalCreated(goal, children.length);
     const started = [], refused = [];
-    for (const c of children) {
-      try { started.push(await jobs.start({ ...c, goal_id: goal.id })); }
-      catch (e) { refused.push({ project: c.project, error: String(e.message || e) }); }
+    // depends_on arrives as indexes into this array — the caller has no job ids
+    // yet — and is resolved to ids as each child is created. A dependency on an
+    // entry that was refused is dropped rather than stranding the dependent.
+    const idByIndex = new Map();
+    for (const [i, c] of children.entries()) {
+      const { depends_on: deps, ...rest } = c;
+      const resolved = (deps || [])
+        .filter(d => d < i)
+        .map(d => idByIndex.get(d))
+        .filter(Boolean);
+      try {
+        const r = await jobs.start({ ...rest, goal_id: goal.id, depends_on: resolved });
+        idByIndex.set(i, r.job_id);
+        started.push(r);
+      } catch (e) { refused.push({ project: c.project, error: String(e.message || e) }); }
     }
     return ok({ goal_id: goal.id, objective: goal.objective, budget_usd: goal.budget_usd, started, refused },
       `goal ${goal.id} created with ${started.length} job(s)${refused.length ? `, ${refused.length} refused` : ''} on a $${goal.budget_usd} budget. Poll goal_status with this goal_id.`);

@@ -100,6 +100,15 @@ export const DEFAULTS = {
   goals: {
     budget_usd: 25,
   },
+  // Live job state pushed to an Open WebUI channel. Open WebUI emits a channel
+  // message over its socket the moment it lands, so this is real push with no
+  // polling and no patch to Open WebUI. webhook_url carries a token, so it
+  // belongs in config.local.json (gitignored), never config.json.
+  notify: {
+    enabled: true,
+    webhook_url: '',
+    timeout_ms: 5000,
+  },
   compose: {
     // Compose projects (directory name OR compose project name) the bridge refuses to touch.
     // The stack that serves the chat UI and the other MCP servers on this box are protected by default.

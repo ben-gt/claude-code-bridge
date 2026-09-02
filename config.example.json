@@ -122,5 +122,11 @@
   "goals": {
     "_comment": "Goals group jobs across projects under one objective, one budget and one shared findings record. budget_usd covers ALL children together and is checked before each dispatch.",
     "budget_usd": 25
+  },
+  "notify": {
+    "_comment": "Live job/goal state posted to an Open WebUI channel. Create a channel, add a webhook, and put the full URL in config.local.json (gitignored) \u2014 it carries a token. Format: http://HOST/api/v1/channels/webhooks/<webhook_id>/<token>",
+    "enabled": true,
+    "webhook_url": "",
+    "timeout_ms": 5000
   }
 }
