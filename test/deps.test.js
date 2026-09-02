@@ -93,3 +93,15 @@ test('quota failover stays off unless enabled and keyed', () => {
     assert.equal(j.state, 'failed', JSON.stringify(fo));
   }
 });
+
+test('activeIn finds concurrent work on a project, ignoring finished and self', () => {
+  const m = mgr();
+  m.jobs.set('j_a', job('j_a', 'running', { project: 'bnd-flux' }));
+  m.jobs.set('j_b', job('j_b', 'queued', { project: 'bnd-flux' }));
+  m.jobs.set('j_c', job('j_c', 'completed', { project: 'bnd-flux' }));
+  m.jobs.set('j_d', job('j_d', 'running', { project: 'bnd-playbook' }));
+  assert.equal(m.activeIn('bnd-flux').length, 2, 'running + queued only');
+  assert.equal(m.activeIn('bnd-flux', 'j_a').length, 1, 'excludes itself');
+  assert.equal(m.activeIn('bnd-playbook').length, 1);
+  assert.equal(m.activeIn('nothing-here').length, 0);
+});

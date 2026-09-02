@@ -102,7 +102,12 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
     },
   }, wrap(async args => {
     const r = await jobs.start(args);
-    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.effort ? `; effort ${r.effort} — ${r.effort_reason}` : ''}). Poll get_task_status with this job_id.`);
+    // The clash goes in the headline, not just the payload: a note buried in
+    // JSON is a note the user never sees.
+    const clash = r.concurrent_on_project
+      ? ` ⚠ ${r.project} already has ${r.concurrent_on_project.count} other job(s) in flight — they cannot see each other's findings, and both are billed. Mention this to the user.`
+      : '';
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.effort ? `; effort ${r.effort} — ${r.effort_reason}` : ''}).${clash} Poll get_task_status with this job_id.`);
   }, 'start_task'));
 
   server.registerTool('start_goal', {
@@ -148,8 +153,11 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
         started.push(r);
       } catch (e) { refused.push({ project: c.project, error: String(e.message || e) }); }
     }
+    const clashes = started.filter(x => x.concurrent_on_project);
     return ok({ goal_id: goal.id, objective: goal.objective, budget_usd: goal.budget_usd, started, refused },
-      `goal ${goal.id} created with ${started.length} job(s)${refused.length ? `, ${refused.length} refused` : ''} on a $${goal.budget_usd} budget. Poll goal_status with this goal_id.`);
+      `goal ${goal.id} created with ${started.length} job(s)${refused.length ? `, ${refused.length} refused` : ''} on a $${goal.budget_usd} budget.`
+      + (clashes.length ? ` ⚠ ${clashes.length} of them landed on a project that already had work in flight — say so before continuing.` : '')
+      + ' Poll goal_status with this goal_id.');
   }, 'start_goal'));
 
   server.registerTool('goal_status', {

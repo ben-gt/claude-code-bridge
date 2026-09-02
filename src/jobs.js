@@ -241,6 +241,21 @@ export class JobManager {
 
   runningCount() { return [...this.jobs.values()].filter(j => j.state === 'running').length; }
 
+  /** Jobs already in flight on the same project.
+   *
+   *  Worktrees keep concurrent jobs from corrupting each other's files, so this
+   *  is not a safety gate — it is an attention gate. Two agents surveying one
+   *  repo at once reach conclusions the other never sees (the blackboard is
+   *  read when a child starts, so a sibling that started at the same moment
+   *  contributes nothing to it), and you pay for both. Worth saying out loud
+   *  before dispatch rather than discovering in the bill. */
+  activeIn(project, exceptId = null) {
+    return [...this.jobs.values()].filter(j =>
+      j.project === project && j.id !== exceptId &&
+      (j.state === 'running' || j.state === 'queued'),
+    );
+  }
+
   /** Name of the first predecessor that has not finished yet, or null when the
    *  job is free to run. A predecessor that FAILED still counts as finished —
    *  the dependent child is told about it through the blackboard and can decide
@@ -321,6 +336,10 @@ export class JobManager {
     // discovering the ceiling by exceeding it, which for a fan-out is the
     // expensive way round.
     if (depends_on?.length && !goal_id) throw new Error('depends_on is only meaningful inside a goal');
+    // Surfaced, never enforced: refusing would break legitimate parallel work
+    // (a goal deliberately fanning several jobs into one repo), and a silent
+    // dispatch is how you end up paying twice for contradictory answers.
+    const clash = this.activeIn(name);
     if (goal_id) {
       if (!this.goals) throw new Error('goals are not enabled on this bridge');
       const gate = this.goals.canDispatch(goal_id, this.jobs);
@@ -369,7 +388,16 @@ export class JobManager {
     this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode}${agent ? ` agent=${agent}` : ''} model=${choice.model} tier=${choice.tier} (${choice.reason})`);
     if (goal_id) this.goals.attach(goal_id, id);
     setImmediate(() => this.pump());
-    return { job_id: id, goal_id: goal_id || undefined, state: job.state, project: name, mode, model: choice.model, tier: choice.tier, model_reason: choice.reason,
+    if (clash.length) {
+      const detail = clash.map(j => `${j.id} (${j.state}${j.started_at ? `, ${Math.max(1, Math.round((Date.now() - Date.parse(j.started_at)) / 60000))}m` : ''})`).join(', ');
+      this.log.warn(`job ${id}: ${name} already has ${clash.length} job(s) in flight: ${detail}`);
+      this.notify?.post(`\u26a0 **${name}** now has ${clash.length + 1} jobs in flight \u2014 they cannot see each other's findings`);
+    }
+    return { job_id: id, goal_id: goal_id || undefined, state: job.state, project: name, mode, model: choice.model,
+      concurrent_on_project: clash.length
+        ? { count: clash.length, jobs: clash.map(j => ({ job_id: j.id, state: j.state, summary: j.summary })),
+            note: `${name} already has ${clash.length} job(s) in flight. They run in separate worktrees so they cannot corrupt each other, but they cannot see each other's findings either, and you are paying for both. Tell the user before continuing if this was not deliberate.` }
+        : undefined, tier: choice.tier, model_reason: choice.reason,
       effort: choice.effort || undefined, effort_reason: choice.effort_reason || undefined, queue_position: this.queuePosition(id), limits };
   }
 
