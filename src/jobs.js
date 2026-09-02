@@ -393,8 +393,44 @@ export class JobManager {
     }
   }
 
+  /** True when this failure was the ACCOUNT running out of room, not the task
+   *  going wrong. Same classification the retry-escalation gate uses. */
+  static isQuotaError(err) {
+    return /session limit|usage limit|rate limit|quota|(more|out of) credits|429/i.test(String(err || ''));
+  }
+
   finish(job, state, error) {
     if (!ACTIVE.has(job.state)) return;
+    // Quota failover. A subscription session cap is a wall the job hit on the
+    // way in, not a verdict on the work — on 2026-08-30 one binned five queued
+    // jobs in 21 seconds. When an API key is configured we re-queue the job
+    // once with that key in its environment, so the fan-out finishes instead
+    // of waiting for the cap to reset.
+    //
+    // Deliberately opt-in and capped: the subscription is flat-rate, an API
+    // key is billed per token, so silently failing over would convert a quota
+    // stall into a bill. It happens at most once per job (failover_used), only
+    // for a genuine quota failure, and only while the goal or job still has
+    // budget.
+    const fo = this.cfg.failover || {};
+    if (
+      state === 'failed' && fo.enabled && fo.api_key && !job.failover_used &&
+      job.kind !== 'compose_redeploy' && JobManager.isQuotaError(error)
+    ) {
+      job.failover_used = true;
+      job.state = 'queued';
+      job.activity = 'quota reached — requeued on the API key';
+      job.pid = null;
+      job.started_at = null;
+      job.error = null;
+      this.procs.delete(job.id);
+      this.save(job, { immediate: true });
+      this.appendTranscript(job, `!! ${scrub(String(error))} -> requeued once on the API key`);
+      this.log.warn(`job ${job.id} hit an account limit; requeued on the API key`);
+      this.notify?.post(`\u26a1 **${job.project}** hit an account limit — requeued on the API key`);
+      setImmediate(() => this.pump());
+      return;
+    }
     job.state = state;
     job.finished_at = nowIso();
     if (error) job.error = scrub(error);
@@ -562,6 +598,12 @@ export class JobManager {
       // Nobody is watching an unattended job, so background/non-essential
       // model calls are pure added latency and spend.
       if (this.cfg.claude.disable_nonessential_traffic) env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+      // Only the failover attempt carries a key. Ordinary jobs run on the
+      // subscription (flat rate); passing the key always would bill every job
+      // per token, which is the opposite of what this is for.
+      if (job.failover_used && this.cfg.failover?.api_key) {
+        env.ANTHROPIC_API_KEY = this.cfg.failover.api_key;
+      }
       const streamFile = fs.openSync(path.join(this.jobDir(job.id), 'stream.jsonl'), 'a');
       let child;
       try {

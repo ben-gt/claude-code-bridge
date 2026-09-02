@@ -128,5 +128,10 @@
     "enabled": true,
     "webhook_url": "",
     "timeout_ms": 5000
+  },
+  "failover": {
+    "_comment": "When a job dies because the ACCOUNT ran out of room (subscription session cap, rate limit), requeue it ONCE with an Anthropic API key in its environment so the work finishes instead of waiting for the cap to reset. Off by default: the subscription is flat-rate while a key is billed per token, so this trades a stall for a bill. Put api_key in config.local.json (gitignored), never here.",
+    "enabled": false,
+    "api_key": ""
   }
 }

@@ -58,3 +58,38 @@ test('the first unmet predecessor is the one reported', () => {
   assert.match(r, /j_2/);
   assert.doesNotMatch(r, /j_3/);
 });
+
+test('quota failover: a session-limit failure requeues once, a task failure does not', () => {
+  const m = mgr();
+  m.cfg.failover = { enabled: true, api_key: 'sk-ant-test' };
+  const j = { id: 'j_q', state: 'running', project: 'bnd-flux', activity: 'x', depends_on: null };
+  m.jobs.set(j.id, j);
+
+  m.finish(j, 'failed', "claude reported an error: You've hit your session limit · resets 11:10am (UTC)");
+  assert.equal(j.state, 'queued', 'requeued rather than failed');
+  assert.equal(j.failover_used, true);
+  assert.equal(j.error, null, 'the quota error is not left on the record');
+
+  // Second time round it must actually fail — no infinite loop.
+  j.state = 'running';
+  m.finish(j, 'failed', 'You have hit your session limit again');
+  assert.equal(j.state, 'failed', 'failover happens at most once');
+
+  // A genuine task failure never triggers it.
+  const t = { id: 'j_t', state: 'running', project: 'p', depends_on: null };
+  m.jobs.set(t.id, t);
+  m.finish(t, 'failed', 'the test suite failed');
+  assert.equal(t.state, 'failed');
+  assert.ok(!t.failover_used);
+});
+
+test('quota failover stays off unless enabled and keyed', () => {
+  for (const fo of [{}, { enabled: true }, { api_key: 'k' }, { enabled: false, api_key: 'k' }]) {
+    const m = mgr();
+    m.cfg.failover = fo;
+    const j = { id: 'j_x', state: 'running', project: 'p', depends_on: null };
+    m.jobs.set(j.id, j);
+    m.finish(j, 'failed', 'hit your session limit');
+    assert.equal(j.state, 'failed', JSON.stringify(fo));
+  }
+});

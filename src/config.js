@@ -109,6 +109,16 @@ export const DEFAULTS = {
     webhook_url: '',
     timeout_ms: 5000,
   },
+  // Quota failover. When a job dies because the ACCOUNT ran out of room (a
+  // subscription session cap, a rate limit), re-queue it once with an Anthropic
+  // API key in its environment so the work finishes instead of waiting for the
+  // cap to reset. Off by default and never in config.json: the subscription is
+  // flat-rate while a key is billed per token, so this trades a stall for a
+  // bill and must be a deliberate choice. Put api_key in config.local.json.
+  failover: {
+    enabled: false,
+    api_key: '',
+  },
   compose: {
     // Compose projects (directory name OR compose project name) the bridge refuses to touch.
     // The stack that serves the chat UI and the other MCP servers on this box are protected by default.
