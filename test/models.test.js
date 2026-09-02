@@ -93,3 +93,15 @@ test('fable 5.1 is the complex tier, reachable by both aliases, and 5.0 still by
   assert.equal(old.model, 'claude-fable-5');
   assert.equal(old.tier, 'custom');
 });
+
+test('a quota failure does not escalate; a real failure still does', () => {
+  const quota = { id: 'j_q', why: 'hit an account limit rather than failing the task', quota: true };
+  const real = { id: 'j_r', why: 'ended failed', quota: false };
+  const q = selectModel(cfg, { prompt: 'x', setup: setupYes, mode: 'execute', priorFailure: quota });
+  assert.equal(q.tier, 'default');
+  assert.equal(q.model, 'claude-opus-5');
+  assert.doesNotMatch(q.reason, /retry of/);
+  const r = selectModel(cfg, { prompt: 'x', setup: setupYes, mode: 'execute', priorFailure: real });
+  assert.equal(r.tier, 'complex');
+  assert.match(r.reason, /retry of j_r/);
+});

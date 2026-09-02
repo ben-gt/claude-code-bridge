@@ -77,7 +77,11 @@ export function selectModel(cfg, {
   const refs = countFileReferences(prompt);
   if (esc.file_references && refs > esc.file_references) triggers.push(`prompt references ${refs} files (> ${esc.file_references})`);
   if (esc.plan_without_claude_setup !== false && mode === 'plan' && setup && !setup.has_claude_setup) triggers.push('plan mode on a project with no .claude setup');
-  if (esc.retry_after_failure !== false && priorFailure) triggers.push(`retry of ${priorFailure.id} which ${priorFailure.why}`);
+  // A quota failure is not a capability failure — see findPriorFailure. Retry
+  // on the tier the job would have had, not a more expensive one.
+  if (esc.retry_after_failure !== false && priorFailure && !priorFailure.quota) {
+    triggers.push(`retry of ${priorFailure.id} which ${priorFailure.why}`);
+  }
 
   if (triggers.length && chosen.tier !== complexTier && tiers[complexTier]) {
     chosen = tierFor(complexTier);

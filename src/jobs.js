@@ -262,10 +262,21 @@ export class JobManager {
   /** Most recent failed Claude job on the same project with the same prompt (for retry escalation). */
   findPriorFailure(project, prompt, retryOf) {
     const norm = t => String(t).replace(/\s+/g, ' ').trim().toLowerCase();
+    // A job that died because the ACCOUNT ran out of room did not fail at the
+    // task — it never got to attempt it. Escalating that to a bigger model
+    // answers a question nobody asked and bills the most expensive tier for
+    // it. On 2026-08-30 a session cap binned five queued jobs in 21 seconds;
+    // retrying them by prompt would have sent every one to the complex tier.
+    const quotaFailure = err => /session limit|usage limit|rate limit|quota|(more|out of) credits|429/i.test(String(err || ''));
+    const describe = j => (
+      quotaFailure(j.error) ? { why: 'hit an account limit rather than failing the task', quota: true }
+        : /cost ceiling/i.test(String(j.error || '')) ? { why: 'hit its cost ceiling', quota: false }
+        : { why: `ended ${j.state}`, quota: false }
+    );
     if (retryOf) {
       const j = this.jobs.get(retryOf);
       if (!j) throw new Error(`retry_of ${retryOf} is not a known job`);
-      return { id: j.id, why: j.error && /cost ceiling/i.test(j.error) ? 'hit its cost ceiling' : `ended ${j.state}` };
+      return { id: j.id, ...describe(j) };
     }
     const prev = [...this.jobs.values()]
       .filter(j => (j.kind || 'claude') === 'claude' && j.project === project && ['failed', 'interrupted'].includes(j.state) && norm(j.prompt) === norm(prompt))
@@ -274,7 +285,7 @@ export class JobManager {
     // Only the most recent attempt matters; if it later succeeded, no escalation.
     const newer = [...this.jobs.values()].find(j => j.project === project && norm(j.prompt) === norm(prompt) && j.state === 'completed' && j.created_at > prev.created_at);
     if (newer) return null;
-    return { id: prev.id, why: prev.error && /cost ceiling/i.test(prev.error) ? 'hit its cost ceiling' : `ended ${prev.state}` };
+    return { id: prev.id, ...describe(prev) };
   }
 
   // ---------- start ----------
