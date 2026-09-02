@@ -432,8 +432,57 @@ export class JobManager {
     return /session limit|usage limit|rate limit|quota|(more|out of) credits|429/i.test(String(err || ''));
   }
 
+  /** Recover what a killed job actually established, from its own stream.
+   *
+   *  result_text is only ever set from the single `result` event at the end of
+   *  a run. A job that hits the cost ceiling, times out, or dies with the
+   *  container never emits one — so it reports NOTHING, despite every
+   *  assistant message it produced sitting in stream.jsonl the whole time.
+   *  Twenty jobs died that way for $169.71 and left no trace of what they had
+   *  worked out.
+   *
+   *  This needs no cooperation from the model and no prompt tokens: the record
+   *  already exists, it was simply never read. */
+  salvagePartial(job) {
+    const f = path.join(this.jobDir(job.id), 'stream.jsonl');
+    let parts = [];
+    try {
+      for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type !== 'assistant') continue;
+        for (const b of (ev.message?.content || [])) {
+          // Visible text only. Thinking blocks are the model's working, not a
+          // finding, and quoting them back as a result would misrepresent what
+          // the job actually concluded.
+          if (b?.type === 'text' && b.text) parts.push(String(b.text));
+        }
+      }
+    } catch { return null; }
+    const body = parts.join('\n\n').trim();
+    if (!body) return null;
+    const tail = body.length > 6000 ? body.slice(-6000) : body;
+    return `[PARTIAL — this job was stopped before it finished, so this is what it had established, not a conclusion]\n\n${tail}`;
+  }
+
   finish(job, state, error) {
     if (!ACTIVE.has(job.state)) return;
+    // Salvage before the bookkeeping below reads result_text: the blackboard
+    // entry, the channel line and the plan file all take what they find here.
+    // Not `!job.result_text`: a job killed at its cost ceiling DOES emit a
+    // result event, carrying the JSON-serialised empty string — the two
+    // characters `""`. That is truthy, so a naive emptiness check skips the
+    // salvage on precisely the twenty most expensive failures ($169.71) this
+    // exists to rescue.
+    if (state !== 'completed' && !String(job.result_text || '').replace(/^["'\s]+|["'\s]+$/g, '')) {
+      const partial = this.salvagePartial(job);
+      if (partial) {
+        job.result_text = scrub(partial);
+        job.notes.push('result recovered from the stream after an abnormal stop');
+        this.log.info(`job ${job.id}: salvaged ${partial.length} chars of partial work from the stream`);
+      }
+    }
     // Quota failover. A subscription session cap is a wall the job hit on the
     // way in, not a verdict on the work — on 2026-08-30 one binned five queued
     // jobs in 21 seconds. When an API key is configured we re-queue the job

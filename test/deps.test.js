@@ -105,3 +105,35 @@ test('activeIn finds concurrent work on a project, ignoring finished and self', 
   assert.equal(m.activeIn('bnd-playbook').length, 1);
   assert.equal(m.activeIn('nothing-here').length, 0);
 });
+
+test('a job killed with an empty result salvages its work from the stream', () => {
+  const m = mgr();
+  const jid = 'j_sal';
+  fs.mkdirSync(path.join(m.jobsDir, jid), { recursive: true });
+  const ev = blocks => JSON.stringify({ type: 'assistant', message: { content: blocks } });
+  fs.writeFileSync(path.join(m.jobsDir, jid, 'stream.jsonl'), [
+    ev([{ type: 'thinking', thinking: 'internal working' }]),
+    ev([{ type: 'text', text: 'Established: the matcher excludes page routes.' }]),
+    '{ not json',
+  ].join('\n'));
+
+  const out = m.salvagePartial({ id: jid });
+  assert.match(out, /^\[PARTIAL/);
+  assert.match(out, /matcher excludes page routes/);
+  assert.doesNotMatch(out, /internal working/, 'thinking is the model working, not a finding');
+
+  // The cost-ceiling shape: result_text is the JSON-encoded empty string.
+  const j = { id: jid, state: 'running', project: 'p', depends_on: null, notes: [], result_text: '""' };
+  m.jobs.set(jid, j);
+  m.finish(j, 'failed', 'cost ceiling of $20 reached');
+  assert.match(j.result_text, /matcher excludes page routes/, 'salvage fired despite a truthy result_text');
+  assert.ok(j.notes.some(n => /recovered from the stream/.test(n)));
+});
+
+test('a completed job is never overwritten by salvage', () => {
+  const m = mgr();
+  const j = { id: 'j_ok', state: 'running', project: 'p', depends_on: null, notes: [], result_text: 'the real answer' };
+  m.jobs.set(j.id, j);
+  m.finish(j, 'completed');
+  assert.equal(j.result_text, 'the real answer');
+});
