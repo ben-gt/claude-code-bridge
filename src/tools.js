@@ -98,6 +98,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
       complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier (slower, more capable). "low" DE-escalates to the fast tier and low effort — use it for lookups, renames, status checks and other grep-shaped work, where it is markedly faster and cheaper.'),
       effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Reasoning effort for this job. Defaults come from the chosen tier. Effort drives adaptive reasoning and is usually the biggest lever on how long a job takes — lower it for scoped, well-specified tasks; raise it for genuinely hard ones.'),
       retry_of: z.string().optional().describe('job_id of a previous failed attempt; retries escalate automatically'),
+      chat_id: z.string().optional().describe('Injected automatically by the chat client so the live feed can link back here. Do not invent one.'),
     },
   }, wrap(async args => {
     const r = await jobs.start(args);
@@ -122,9 +123,10 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
         depends_on: z.array(z.number().int().min(0)).optional().describe('Indexes of earlier entries in this array that must finish first. Use it when a child needs an earlier one\'s findings — it waits, then starts with those findings already on the record. A failed predecessor still releases it.'),
       })).min(1).max(12).describe('One entry per project. Ordered — earlier children record findings the later ones read.'),
       budget_usd: z.number().positive().optional().describe(`Ceiling for the WHOLE goal, not per job (default $${cfg.goals?.budget_usd ?? 25}). Dispatch stops once it is spent.`),
+      chat_id: z.string().optional().describe('Injected automatically by the chat client so the live feed can link back here. Do not invent one.'),
     },
-  }, wrap(async ({ objective, jobs: children, budget_usd }) => {
-    const goal = goals.create({ objective, budget_usd });
+  }, wrap(async ({ objective, jobs: children, budget_usd, chat_id }) => {
+    const goal = goals.create({ objective, budget_usd, chat_id });
     // Announced before the children are dispatched, so the channel reads in the
     // order things actually happened rather than showing a goal appearing after
     // its own first job started.
@@ -141,7 +143,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
         .map(d => idByIndex.get(d))
         .filter(Boolean);
       try {
-        const r = await jobs.start({ ...rest, goal_id: goal.id, depends_on: resolved });
+        const r = await jobs.start({ ...rest, goal_id: goal.id, depends_on: resolved, chat_id });
         idByIndex.set(i, r.job_id);
         started.push(r);
       } catch (e) { refused.push({ project: c.project, error: String(e.message || e) }); }

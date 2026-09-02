@@ -66,7 +66,7 @@ export class GoalManager {
     return g;
   }
 
-  create({ objective, budget_usd }) {
+  create({ objective, budget_usd, chat_id }) {
     const budget = Number(budget_usd ?? this.cfg.goals?.budget_usd ?? 25);
     if (!Number.isFinite(budget) || budget <= 0) throw new Error('budget_usd must be a positive number');
     const goal = {
@@ -75,6 +75,7 @@ export class GoalManager {
       state: 'active',
       budget_usd: budget,
       job_ids: [],
+      chat_id: chat_id || null,
       created_at: nowIso(),
       finished_at: null,
     };
@@ -85,6 +86,15 @@ export class GoalManager {
     this.goals.set(goal.id, goal);
     this.save(goal);
     return goal;
+  }
+
+  /** Human label for a goal: the objective's first clause, not its id. */
+  label(goalId) {
+    const g = this.goals.get(goalId);
+    if (!g) return null;
+    const first = String(g.objective || '').replace(/\s+/g, ' ')
+      .split(/(?<=[.;:])\s/)[0].replace(/[.;:,]\s*$/, '').trim();
+    return first ? (first.length > 60 ? first.slice(0, 60).trim() + '\u2026' : first) : null;
   }
 
   attach(goalId, jobId) {

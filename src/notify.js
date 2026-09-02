@@ -22,8 +22,39 @@ const GLYPH = {
   cancelled: '⊘', interrupted: '⊘', queued: '·',
 };
 
+
+// Full ids are 16 characters of base36 and appear on every line; the first
+// eight are already unique across every goal this bridge has ever run, and a
+// short id is the difference between a scannable feed and a wall of hashes.
+const shortId = id => String(id || '').slice(0, 10);
+
+// A goal reads better as what it is FOR than as a base36 id. The objective's
+// first clause is almost always the name someone would have given it anyway,
+// so the id becomes a suffix for disambiguation rather than the headline.
+function goalLabel(goal) {
+  const first = String(goal.objective || '')
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.;:])\s|\s[\u2014-]\s/)[0]
+    .replace(/[.;:,]\s*$/, '')
+    .trim();
+  return first ? (first.length > 60 ? first.slice(0, 60).trim() + '\u2026' : first) : shortId(goal.id);
+}
+
+// "claude-fable-5-1" reads as noise next to a project name; "fable-5-1" does not.
+const shortModel = m => String(m || '').replace(/^claude-/, '').replace(/^anthropic\//, '');
+
 const oneLine = (s, n = 220) => {
-  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  // Job output is markdown. Quoted verbatim into a channel, a "### Git State
+  // Report" heading renders as giant type and a code fence swallows the rest of
+  // the line — one job's summary took over the whole feed. Flatten the markers
+  // so a quote stays a quote.
+  const t = String(s || '')
+    .replace(/```[\s\S]*?```/g, ' [code] ')
+    .replace(/^\s{0,3}#{1,6}\s*/gm, '')
+    .replace(/^\s{0,3}[-*+]\s+/gm, '· ')
+    .replace(/[*_`>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   return t.length > n ? t.slice(0, n) + '…' : t;
 };
 
@@ -38,6 +69,10 @@ export class Notifier {
   constructor(cfg, { log = console } = {}) {
     this.log = log;
     const n = cfg.notify || {};
+    // Base URL of the chat UI, so a channel line can link back to the
+    // conversation that started the work. Without it the feed tells you what
+    // happened but not where to go and say something about it.
+    this.chatBase = String(n.chat_base_url || '').replace(/\/+$/, '');
     this.url = String(n.webhook_url || '').trim();
     this.timeoutMs = Number(n.timeout_ms ?? 5000);
     this.enabled = n.enabled !== false && !!this.url;
@@ -83,26 +118,46 @@ export class Notifier {
     if (this.failures === 3) this.log.warn('notify: further channel failures will be silent until one succeeds');
   }
 
+  /** Deep-link back to the chat that dispatched this work, when we know it. */
+  chatLink(chatId, label) {
+    if (!this.chatBase || !chatId) return null;
+    return `[${label}](${this.chatBase}/c/${chatId})`;
+  }
+
   jobStarted(job) {
-    const bits = [job.model_selected, job.effort_selected && `effort ${job.effort_selected}`, job.mode]
-      .filter(Boolean).join(' · ');
-    this.post(`${GLYPH.running} **${job.project}** started — ${bits}${job.goal_id ? ` · goal \`${job.goal_id}\`` : ''}\n${oneLine(job.summary, 140)}`);
+    // One scannable line. The prompt is deliberately NOT echoed: it is often a
+    // page of instructions, and repeating it turned every start into a wall of
+    // text that buried the one fact worth seeing — which project just moved.
+    const bits = [
+      job.mode,
+      shortModel(job.model_selected),
+      job.effort_selected,
+      job.goal_label ? `goal: ${job.goal_label}` : null,
+      this.chatLink(job.chat_id, 'chat'),
+    ].filter(Boolean).join(' \u00b7 ');
+    this.post(`${GLYPH.running} **${job.project}** started \u2014 ${bits}`);
   }
 
   jobFinished(job) {
-    const g = GLYPH[job.state] || '·';
-    const cost = job.cost_usd != null ? `$${Number(job.cost_usd).toFixed(2)}` : null;
-    const bits = [cost, elapsed(job), job.goal_id ? `goal \`${job.goal_id}\`` : null].filter(Boolean).join(' · ');
-    const lines = [`${g} **${job.project}** ${job.state}${bits ? ` — ${bits}` : ''}`];
-    if (job.pr_url) lines.push(job.pr_url);
-    else if (job.branch) lines.push(`branch \`${job.branch}\``);
+    const g = GLYPH[job.state] || '\u00b7';
+    const bits = [
+      job.cost_usd != null ? `$${Number(job.cost_usd).toFixed(2)}` : null,
+      elapsed(job),
+      job.goal_label ? `goal: ${job.goal_label}` : null,
+      this.chatLink(job.chat_id, 'chat'),
+    ].filter(Boolean).join(' \u00b7 ');
+    const lines = [`${g} **${job.project}** ${job.state}${bits ? ` \u2014 ${bits}` : ''}`];
+    const link = job.pr_url || (job.branch ? `\`${job.branch}\`` : null);
+    if (link) lines.push(link);
     const tail = job.state === 'completed' ? job.result_text : (job.error || job.result_text);
-    if (tail) lines.push(`> ${oneLine(tail)}`);
+    if (tail) lines.push(`> ${oneLine(tail, 160)}`);
     this.post(lines.join('\n'));
   }
 
   goalCreated(goal, count) {
-    this.post(`◆ **Goal \`${goal.id}\`** — ${oneLine(goal.objective, 180)}\n${count} job(s) dispatched · budget $${goal.budget_usd.toFixed(2)}`);
+    const link = this.chatLink(goal.chat_id, 'chat');
+    const bits = [`${count} job(s)`, `budget $${goal.budget_usd.toFixed(2)}`, link].filter(Boolean).join(' \u00b7 ');
+    this.post(`\u25c6 **${goalLabel(goal)}** \u2014 ${bits}`);
   }
 
   goalFinished(goal, { counts, spent }) {
@@ -111,6 +166,8 @@ export class Notifier {
       counts.failed && `${counts.failed} failed`,
       counts.cancelled && `${counts.cancelled} cancelled`,
     ].filter(Boolean).join(', ') || 'no children';
-    this.post(`◆ **Goal \`${goal.id}\`** ${goal.state} — ${done} · $${spent.toFixed(2)} of $${goal.budget_usd.toFixed(2)}`);
+    const link = this.chatLink(goal.chat_id, 'chat');
+    const bits = [done, `$${spent.toFixed(2)} of $${goal.budget_usd.toFixed(2)}`, link].filter(Boolean).join(' \u00b7 ');
+    this.post(`\u25c6 **${goalLabel(goal)}** ${goal.state} \u2014 ${bits}`);
   }
 }

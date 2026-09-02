@@ -108,6 +108,9 @@ export const DEFAULTS = {
     enabled: true,
     webhook_url: '',
     timeout_ms: 5000,
+    // Base URL of the chat UI, so a channel line can link back to the
+    // conversation that asked for the work.
+    chat_base_url: '',
   },
   // Quota failover. When a job dies because the ACCOUNT ran out of room (a
   // subscription session cap, a rate limit), re-queue it once with an Anthropic

@@ -124,10 +124,11 @@
     "budget_usd": 25
   },
   "notify": {
-    "_comment": "Live job/goal state posted to an Open WebUI channel. Create a channel, add a webhook, and put the full URL in config.local.json (gitignored) \u2014 it carries a token. Format: http://HOST/api/v1/channels/webhooks/<webhook_id>/<token>",
+    "_comment": "Live job/goal state posted to an Open WebUI channel. Create a channel, add a webhook, and put the full URL in config.local.json (gitignored) \u2014 it carries a token. Format: http://HOST/api/v1/channels/webhooks/<webhook_id>/<token> chat_base_url is the chat UI origin (e.g. https://chat.example.com) so feed lines can link back to the conversation.",
     "enabled": true,
     "webhook_url": "",
-    "timeout_ms": 5000
+    "timeout_ms": 5000,
+    "chat_base_url": ""
   },
   "failover": {
     "_comment": "When a job dies because the ACCOUNT ran out of room (subscription session cap, rate limit), requeue it ONCE with an Anthropic API key in its environment so the work finishes instead of waiting for the cap to reset. Off by default: the subscription is flat-rate while a key is billed per token, so this trades a stall for a bill. Put api_key in config.local.json (gitignored), never here.",

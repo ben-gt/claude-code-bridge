@@ -304,7 +304,7 @@ export class JobManager {
   }
 
   // ---------- start ----------
-  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of, goal_id, depends_on }) {
+  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of, goal_id, depends_on, chat_id }) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) throw new Error('prompt is required');
     if (!['plan', 'execute'].includes(mode)) throw new Error(`mode must be "plan" or "execute" (got ${mode})`);
     const dir = resolveProjectDir(this.cfg, project);
@@ -352,7 +352,12 @@ export class JobManager {
       id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
       model_selected: choice.model, tier: choice.tier, model_reason: choice.reason,
       effort_selected: choice.effort || null, effort_reason: choice.effort_reason || null,
-      goal_id: goal_id || null, depends_on: depends_on?.length ? [...depends_on] : null, retry_of: priorFailure?.id || null,
+      goal_id: goal_id || null, depends_on: depends_on?.length ? [...depends_on] : null,
+      // Where this was asked for. Carried only so the channel feed can link
+      // back to the conversation; never used for auth or lookup.
+      chat_id: chat_id || null,
+      goal_label: goal_id && this.goals ? this.goals.label(goal_id) : null,
+      retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
