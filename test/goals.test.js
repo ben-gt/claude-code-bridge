@@ -113,3 +113,27 @@ test('goals survive a restart', () => {
   assert.equal(again.get(goal.id).objective, 'persisted');
   assert.match(again.blackboard(goal.id), /a finding/);
 });
+
+test('the board keeps the NEWEST findings when it overflows', () => {
+  const g = mk();
+  const goal = g.create({ objective: 'keep the newest' });
+  for (let i = 1; i <= 40; i++) {
+    g.appendFinding(goal.id, { job: job({ id: `j_${i}`, project: `proj-${i}` }), text: `finding ${i} `.repeat(60) });
+  }
+  const bb = g.blackboard(goal.id, { max: 4000 });
+  assert.ok(bb.length <= 4200, 'respects the cap');
+  assert.match(bb, /keep the newest/, 'objective survives');
+  assert.match(bb, /proj-40/, 'newest finding survives');
+  assert.doesNotMatch(bb, /proj-1 —/, 'oldest is the one dropped');
+  assert.match(bb, /earlier findings trimmed/);
+});
+
+test('harness apologies never reach the board', () => {
+  const g = mk();
+  const goal = g.create({ objective: 'o' });
+  g.appendFinding(goal.id, { job: job(), text:
+    'The Write tool is not available in this session, so the plan file cannot be created.\nThe real finding is here.' });
+  const bb = g.blackboard(goal.id);
+  assert.doesNotMatch(bb, /Write tool is not available/);
+  assert.match(bb, /The real finding is here/);
+});

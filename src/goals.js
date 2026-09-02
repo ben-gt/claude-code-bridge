@@ -109,8 +109,18 @@ export class GoalManager {
   /** Blackboard as the children see it. Capped so a long-running goal cannot
    *  quietly become the largest thing in every child's prompt. */
   blackboard(goalId, { max = 20000 } = {}) {
-    try { return trunc(fs.readFileSync(this.blackboardFile(goalId), 'utf8'), max); }
-    catch { return ''; }
+    try {
+      const all = fs.readFileSync(this.blackboardFile(goalId), 'utf8');
+      if (all.length <= max) return all;
+      // Keep the TAIL, not the head. Findings are appended, so head-truncation
+      // drops the newest ones — exactly the entries a starting child most needs
+      // — while faithfully preserving the objective and the oldest notes. One
+      // goal's board reached 31,452 chars against this cap, so later children
+      // were reading history and missing everything recent.
+      const head = all.slice(0, all.indexOf('---') + 4) || '';
+      const tail = all.slice(-(max - head.length - 80));
+      return `${head}\n_[earlier findings trimmed — newest kept]_\n${tail.slice(tail.indexOf('\n## ') + 1 || 0)}`;
+    } catch { return ''; }
   }
 
   /** Append one child's findings. Called from the job lifecycle, never by the
@@ -118,7 +128,16 @@ export class GoalManager {
   appendFinding(goalId, { job, text }) {
     const g = this.goals.get(goalId);
     if (!g) return;
-    const body = String(text || '').trim();
+    // Strip harness apologies before they reach the board. A denied tool
+    // produces a paragraph explaining that the tool was denied, which becomes
+    // the FIRST line of the finding, is prepended verbatim to every later
+    // child, and displaces genuine findings under the size cap — three agents
+    // in a row re-reported the same denial because each read the last one's
+    // apology. It is a fact about the harness, not about the work.
+    const body = String(text || '')
+      .replace(/^[^\n]*\b(write|edit|notebookedit)\b[^\n]*\b(tool|is)\b[^\n]*\b(not available|disabled|denied|blocked)\b[^\n]*\n?/gim, '')
+      .replace(/^[^\n]*\bplan file (could not|cannot) be (created|written)\b[^\n]*\n?/gim, '')
+      .trim();
     const entry = [
       `\n## ${job.project} — ${job.state} (${job.id})`,
       `_${nowIso()}_${job.branch ? ` · branch \`${job.branch}\`` : ''}${job.pr_url ? ` · ${job.pr_url}` : ''}`,
