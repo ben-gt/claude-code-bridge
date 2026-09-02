@@ -75,10 +75,11 @@
         "effort": "medium"
       },
       "complex": {
-        "model": "claude-fable-5",
+        "model": "claude-fable-5-1",
         "max_cost_usd": 12,
         "aliases": [
-          "fable"
+          "fable",
+          "fable-5-1"
         ],
         "effort": "high"
       }

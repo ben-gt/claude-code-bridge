@@ -60,8 +60,16 @@ export const DEFAULTS = {
     // no human is reading them. Sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
     disable_nonessential_traffic: true,
   },
-  // Model tiers. Names are policy; ids were confirmed against Claude Code 2.1.240
-  // (`--model opus` -> claude-opus-5, `--model fable` -> claude-fable-5). Change here, not in code.
+  // Model tiers. Names are policy; ids were confirmed against Claude Code 2.1.251
+  // and the live Models API on 2026-09-02. Change here, not in code.
+  //
+  // claude-fable-5-1 (Claude Fable 5.1, released 2026-08-28) supersedes
+  // claude-fable-5 on the complex tier: 1M context, 128K max output, and all
+  // five effort levels (low/medium/high/xhigh/max) per its Models API
+  // capabilities. It is the most expensive model here by a wide margin, which
+  // is exactly why the tier carries an explicit effort and its own cost
+  // ceiling rather than inheriting either. claude-fable-5 is still reachable
+  // by passing the raw id as `model`.
   models: {
     default_tier: 'default',
     complex_tier: 'complex',
@@ -75,7 +83,7 @@ export const DEFAULTS = {
     tiers: {
       fast: { model: 'claude-haiku-4-5', max_cost_usd: 2, aliases: ['haiku', 'fast'], effort: 'low' },
       default: { model: 'claude-opus-5', max_cost_usd: 5, aliases: ['opus'], effort: 'medium' },
-      complex: { model: 'claude-fable-5', max_cost_usd: 12, aliases: ['fable'], effort: 'high' },
+      complex: { model: 'claude-fable-5-1', max_cost_usd: 12, aliases: ['fable', 'fable-5-1'], effort: 'high' },
     },
     // Crude, explainable escalation triggers — expected to be tuned.
     escalation: {

@@ -1,6 +1,6 @@
 // Model tier selection. Policy lives in config (models.tiers / models.escalation); this module
-// just applies it and explains the choice. Canonical ids were confirmed against Claude Code 2.1.240:
-//   --model opus  -> claude-opus-5      --model fable -> claude-fable-5
+// just applies it and explains the choice. Canonical ids were confirmed against Claude Code 2.1.251:
+//   --model opus  -> claude-opus-5      --model fable -> claude-fable-5-1
 // Claude Code accepts those aliases too, but config should carry the canonical ids.
 
 const FILE_RE = /(?:^|[\s`'"(,])((?:[\w.@-]+\/)+[\w.@-]+|[\w@-]+\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|swift|md|json|ya?ml|toml|css|scss|html|sql|sh|env|lock|prisma|vue|svelte))(?=$|[\s`'")\],:;])/g;

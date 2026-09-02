@@ -21,21 +21,21 @@ test('escalation triggers name their reason', () => {
   assert.match(selectModel(cfg, { prompt: 'plan it', mode: 'plan', setup: setupNo }).reason, /no \.claude setup/);
   assert.match(selectModel(cfg, { prompt: 'x', setup: setupYes, mode: 'execute', priorFailure: { id: 'j_1', why: 'hit its cost ceiling' } }).reason, /retry of j_1 which hit its cost ceiling/);
   const r = selectModel(cfg, { prompt: 'x', complexity: 'high', setup: setupYes, mode: 'execute' });
-  assert.equal(r.model, 'claude-fable-5'); assert.equal(r.max_cost_usd, 12);
+  assert.equal(r.model, 'claude-fable-5-1'); assert.equal(r.max_cost_usd, 12);
 });
 
 test('explicit model always wins, both directions', () => {
   const down = selectModel(cfg, { prompt: 'x', complexity: 'high', explicitModel: 'default', setup: setupYes });
   assert.equal(down.model, 'claude-opus-5'); assert.ok(down.explicit);
   const alias = selectModel(cfg, { prompt: 'x', explicitModel: 'fable', setup: setupYes });
-  assert.equal(alias.model, 'claude-fable-5'); assert.equal(alias.tier, 'complex');
+  assert.equal(alias.model, 'claude-fable-5-1'); assert.equal(alias.tier, 'complex');
   const raw = selectModel(cfg, { prompt: 'x', explicitModel: 'claude-sonnet-5', setup: setupYes });
   assert.equal(raw.model, 'claude-sonnet-5'); assert.equal(raw.tier, 'custom');
 });
 
 test('project tier baseline and config-driven names', () => {
   const r = selectModel(cfg, { prompt: 'x', projectOverrides: { tier: 'complex' }, setup: setupYes, mode: 'execute' });
-  assert.equal(r.model, 'claude-fable-5'); assert.match(r.reason, /project default tier/);
+  assert.equal(r.model, 'claude-fable-5-1'); assert.match(r.reason, /project default tier/);
   const c2 = JSON.parse(JSON.stringify(cfg)); c2.models.tiers.default.model = 'claude-something-else';
   assert.equal(selectModel(c2, { prompt: 'x', setup: setupYes, mode: 'execute' }).model, 'claude-something-else');
   assert.throws(() => selectModel(cfg, { prompt: 'x', projectOverrides: { tier: 'nope' } }), /not configured/);
@@ -79,4 +79,17 @@ test('effort is omitted entirely when nothing configures one', () => {
   for (const t of Object.values(bare.models.tiers)) delete t.effort;
   const r = selectModel(bare, { prompt: 'x', setup: setupYes, mode: 'execute' });
   assert.equal(r.effort, null);
+});
+
+test('fable 5.1 is the complex tier, reachable by both aliases, and 5.0 still by raw id', () => {
+  assert.equal(selectModel(cfg, { prompt: 'x', complexity: 'high', setup: setupYes, mode: 'execute' }).model, 'claude-fable-5-1');
+  for (const a of ['fable', 'fable-5-1', 'complex']) {
+    const r = selectModel(cfg, { prompt: 'x', explicitModel: a, setup: setupYes });
+    assert.equal(r.model, 'claude-fable-5-1', `alias ${a}`);
+    assert.equal(r.effort, 'high', `alias ${a} effort`);
+  }
+  // The previous generation stays reachable as a raw id, on the default ceiling.
+  const old = selectModel(cfg, { prompt: 'x', explicitModel: 'claude-fable-5', setup: setupYes });
+  assert.equal(old.model, 'claude-fable-5');
+  assert.equal(old.tier, 'custom');
 });

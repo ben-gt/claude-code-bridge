@@ -50,7 +50,7 @@
       "note": "PRODUCTION deploy checkout: the live Beyond IMS website Docker stack (Next.js web + Cloudflare tunnel) builds from THIS directory. Publishing a merged change = update_checkout here, then compose_redeploy. For development tasks use bnd-ims-website (clean working copy of the same repo)."
     },
     "bnd-ims-website": {
-      "note": "Clean working copy of Beyond-One-AU/beyond-ims-website for development tasks (start_task here). Production serves from the beyond-ims-website checkout — deploy there after merging."
+      "note": "Clean working copy of Beyond-One-AU/beyond-ims-website for development tasks (start_task here). Production serves from the beyond-ims-website checkout \u2014 deploy there after merging."
     }
   },
   "models": {
@@ -65,11 +65,13 @@
         ]
       },
       "complex": {
-        "model": "claude-fable-5",
+        "model": "claude-fable-5-1",
         "max_cost_usd": 20,
         "aliases": [
-          "fable"
-        ]
+          "fable",
+          "fable-5-1"
+        ],
+        "effort": "high"
       }
     },
     "escalation": {
