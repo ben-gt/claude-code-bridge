@@ -118,5 +118,9 @@
       "allow_untracked": true,
       "tier": "complex"
     }
+  },
+  "goals": {
+    "_comment": "Goals group jobs across projects under one objective, one budget and one shared findings record. budget_usd covers ALL children together and is checked before each dispatch.",
+    "budget_usd": 25
   }
 }

@@ -94,6 +94,12 @@ export const DEFAULTS = {
       retry_after_failure: true,
     },
   },
+  // Goals: one objective, many jobs, one budget, one shared findings record.
+  // The budget is deliberately goal-wide — eight children under a per-job
+  // ceiling is eight times that ceiling, which is not a limit anyone chose.
+  goals: {
+    budget_usd: 25,
+  },
   compose: {
     // Compose projects (directory name OR compose project name) the bridge refuses to touch.
     // The stack that serves the chat UI and the other MCP servers on this box are protected by default.

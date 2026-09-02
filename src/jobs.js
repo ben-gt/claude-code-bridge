@@ -42,8 +42,9 @@ function pidAlive(pid) {
 }
 
 export class JobManager {
-  constructor(cfg, projectIndex, { log = console } = {}) {
+  constructor(cfg, projectIndex, { log = console, goals = null } = {}) {
     this.cfg = cfg;
+    this.goals = goals;
     this.projects = projectIndex;
     this.log = log;
     this.jobsDir = path.join(cfg.data_dir, 'jobs');
@@ -289,7 +290,7 @@ export class JobManager {
   }
 
   // ---------- start ----------
-  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of }) {
+  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of, goal_id }) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) throw new Error('prompt is required');
     if (!['plan', 'execute'].includes(mode)) throw new Error(`mode must be "plan" or "execute" (got ${mode})`);
     const dir = resolveProjectDir(this.cfg, project);
@@ -302,6 +303,14 @@ export class JobManager {
     if (base_branch && (!/^[A-Za-z0-9._\/-]{1,200}$/.test(base_branch) || base_branch.startsWith('-') || base_branch.includes('..'))) throw new Error('invalid base_branch');
     if (complexity && !['low', 'normal', 'high'].includes(complexity)) throw new Error('complexity must be low, normal or high');
     if (effort && !EFFORT_LEVELS.includes(effort)) throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
+    // The goal budget is checked BEFORE dispatch. Checking after would mean
+    // discovering the ceiling by exceeding it, which for a fan-out is the
+    // expensive way round.
+    if (goal_id) {
+      if (!this.goals) throw new Error('goals are not enabled on this bridge');
+      const gate = this.goals.canDispatch(goal_id, this.jobs);
+      if (!gate.ok) throw new Error(`cannot dispatch into goal ${goal_id}: ${gate.why}`);
+    }
     const priorFailure = this.findPriorFailure(name, prompt, retry_of);
     const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure, explicitEffort: effort });
 
@@ -327,7 +336,8 @@ export class JobManager {
     const job = {
       id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
       model_selected: choice.model, tier: choice.tier, model_reason: choice.reason,
-      effort_selected: choice.effort || null, effort_reason: choice.effort_reason || null, retry_of: priorFailure?.id || null,
+      effort_selected: choice.effort || null, effort_reason: choice.effort_reason || null,
+      goal_id: goal_id || null, retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
@@ -337,8 +347,9 @@ export class JobManager {
     this.jobs.set(id, job);
     this.save(job, { immediate: true });
     this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode}${agent ? ` agent=${agent}` : ''} model=${choice.model} tier=${choice.tier} (${choice.reason})`);
+    if (goal_id) this.goals.attach(goal_id, id);
     setImmediate(() => this.pump());
-    return { job_id: id, state: job.state, project: name, mode, model: choice.model, tier: choice.tier, model_reason: choice.reason,
+    return { job_id: id, goal_id: goal_id || undefined, state: job.state, project: name, mode, model: choice.model, tier: choice.tier, model_reason: choice.reason,
       effort: choice.effort || undefined, effort_reason: choice.effort_reason || undefined, queue_position: this.queuePosition(id), limits };
   }
 
@@ -371,6 +382,14 @@ export class JobManager {
     this.procs.delete(job.id);
     this.save(job, { immediate: true });
     this.appendTranscript(job, `== job ${state}${error ? `: ${error}` : ''}`);
+    // A child reports to the blackboard however it ended. A failure is a
+    // finding too — the next child should not spend money rediscovering it.
+    if (job.goal_id && this.goals) {
+      try {
+        this.goals.appendFinding(job.goal_id, { job, text: job.result_text || job.error || '' });
+        this.goals.settle(job.goal_id, this.jobs);
+      } catch (e) { this.log.warn(`goal ${job.goal_id}: post-finish bookkeeping failed: ${e.message}`); }
+    }
     setImmediate(() => this.pump());
   }
 
@@ -471,6 +490,21 @@ export class JobManager {
       `This worktree contains committed state only: untracked files from the project's main checkout (local .env files, node_modules, build output) are absent. If the task needs dependencies to build or test, install them here first; if a local-only file the task needs is missing, say so in your summary instead of guessing.`,
       `Stay inside this worktree. Never print secrets, tokens, or the contents of .env files in your output.`,
     ];
+    if (job.goal_id && this.goals) {
+      const g = this.goals.goals.get(job.goal_id);
+      if (g) {
+        lines.push(
+          `You are one of several agents working towards a shared goal: ${g.objective}`,
+          `Your slice of it is the task above. Stay in your own repository — another agent owns each of the others.`,
+          `Findings recorded by the agents that ran before you are below. Trust them, do not re-derive them, and do not contradict them without saying why. If none are listed, you are first.`,
+          '',
+          '--- SHARED FINDINGS ---',
+          this.goals.blackboard(job.goal_id),
+          '--- END SHARED FINDINGS ---',
+          `Your final message is appended to that record for the agents that follow, so write it for them: what you established, what you changed, and what is still unresolved.`,
+        );
+      }
+    }
     if (job.mode === 'plan') {
       lines.push(
         `This is PLAN mode: investigate the codebase and produce a concrete, reviewable implementation plan as your final message — files to touch, the approach, risks, and how to verify. Do NOT modify any files and do NOT create branches or commits.`,

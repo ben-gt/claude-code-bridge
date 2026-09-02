@@ -21,7 +21,7 @@ function fail(err) {
 }
 const wrap = fn => async args => { try { return await fn(args ?? {}); } catch (e) { return fail(e); } };
 
-export function registerTools(server, { cfg, projects, jobs, log }) {
+export function registerTools(server, { cfg, projects, jobs, goals, log }) {
   // Log every tool call (name, outcome, duration) — never the arguments, which may carry prompts/paths.
   const origRegister = server.registerTool.bind(server);
   server.registerTool = (name, config, handler) => origRegister(name, config, async (args, extra) => {
@@ -103,6 +103,61 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     const r = await jobs.start(args);
     return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.effort ? `; effort ${r.effort} — ${r.effort_reason}` : ''}). Poll get_task_status with this job_id.`);
   }, 'start_task'));
+
+  server.registerTool('start_goal', {
+    title: 'Start a goal',
+    description: `Create a GOAL: one objective pursued by several jobs across several projects, sharing one budget and one findings record. Use this instead of repeated start_task when a single outcome spans more than one repository ("get passkeys working on every portal"). Children do not talk to each other — each reads every earlier child's findings when it starts, and its final message is appended for the ones that follow, so order matters: put the job others depend on first. The goal budget covers ALL children together and is checked before each dispatch, so the fan-out stops when the money runs out rather than after. Returns the goal_id and the dispatched jobs; poll goal_status.`,
+    inputSchema: {
+      objective: z.string().describe('The outcome, in one or two sentences. Every child sees this verbatim.'),
+      jobs: z.array(z.object({
+        project: z.string().describe('Project name as shown by list_projects'),
+        prompt: z.string().describe("This child's slice of the objective"),
+        mode: z.enum(['plan', 'execute']).optional(),
+        model: z.string().optional(),
+        complexity: z.enum(['low', 'normal', 'high']).optional(),
+        effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+        agent: z.string().optional(),
+        base_branch: z.string().optional(),
+        max_cost_usd: z.number().positive().optional(),
+      })).min(1).max(12).describe('One entry per project. Ordered — earlier children record findings the later ones read.'),
+      budget_usd: z.number().positive().optional().describe(`Ceiling for the WHOLE goal, not per job (default $${cfg.goals?.budget_usd ?? 25}). Dispatch stops once it is spent.`),
+    },
+  }, wrap(async ({ objective, jobs: children, budget_usd }) => {
+    const goal = goals.create({ objective, budget_usd });
+    const started = [], refused = [];
+    for (const c of children) {
+      try { started.push(await jobs.start({ ...c, goal_id: goal.id })); }
+      catch (e) { refused.push({ project: c.project, error: String(e.message || e) }); }
+    }
+    return ok({ goal_id: goal.id, objective: goal.objective, budget_usd: goal.budget_usd, started, refused },
+      `goal ${goal.id} created with ${started.length} job(s)${refused.length ? `, ${refused.length} refused` : ''} on a $${goal.budget_usd} budget. Poll goal_status with this goal_id.`);
+  }, 'start_goal'));
+
+  server.registerTool('goal_status', {
+    title: 'Get goal status',
+    description: 'The whole board for one goal in a single call: per-job state, model, effort and cost; the totals; and the shared findings recorded so far. Prefer this over polling each job individually — it is one call instead of N, and it returns the findings record, which is where the actual answers accumulate.',
+    inputSchema: { goal_id: z.string() },
+  }, wrap(async ({ goal_id }) => {
+    const st = goals.status(goal_id, jobs.jobs);
+    const c = st.counts;
+    return ok(st, `goal ${goal_id} ${st.state}: ${c.completed} done, ${c.running} running, ${c.queued} queued, ${c.failed} failed — $${st.spent_usd.toFixed(2)} of $${st.budget_usd.toFixed(2)}.`);
+  }, 'goal_status'));
+
+  server.registerTool('goal_cancel', {
+    title: 'Cancel a goal',
+    description: 'Stop a goal: cancels every running and queued child and blocks further dispatch. Work already committed to a child branch survives; nothing is reverted.',
+    inputSchema: { goal_id: z.string() },
+  }, wrap(async ({ goal_id }) => {
+    const g = goals.cancel(goal_id);
+    const stopped = [];
+    for (const id of g.job_ids) {
+      const j = jobs.jobs.get(id);
+      if (j && (j.state === 'running' || j.state === 'queued')) {
+        try { await jobs.cancel(id); stopped.push(id); } catch { /* already gone */ }
+      }
+    }
+    return ok({ goal_id, state: g.state, cancelled_jobs: stopped }, `goal ${goal_id} cancelled; stopped ${stopped.length} job(s).`);
+  }, 'goal_cancel'));
 
   server.registerTool('get_task_status', {
     title: 'Get task status',

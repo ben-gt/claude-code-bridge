@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loadConfig, REPO_ROOT } from './config.js';
 import { ProjectIndex } from './projects.js';
 import { JobManager } from './jobs.js';
+import { GoalManager } from './goals.js';
 import { registerTools } from './tools.js';
 import { addSecret, scrub } from './scrub.js';
 import { cleanCloneTemp } from './clone.js';
@@ -50,7 +51,9 @@ async function main() {
   addSecret(token);
 
   const projects = new ProjectIndex(cfg);
-  const jobs = new JobManager(cfg, projects, { log });
+  const goals = new GoalManager(cfg, { log });
+  goals.init();
+  const jobs = new JobManager(cfg, projects, { log, goals });
   jobs.init();
   cleanCloneTemp(cfg);
   const self = await detectSelfComposeProject();
@@ -86,7 +89,7 @@ async function main() {
       'Jobs run in disposable git worktrees: a dirty checkout never blocks a job and jobs never touch the checkout. Deploying a stack that builds from its checkout: merge the PR, update_checkout, compose_redeploy (projects carry a note in list_projects when this applies).',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
     ].join('\n') });
-    registerTools(server, { cfg, projects, jobs, log });
+    registerTools(server, { cfg, projects, jobs, goals, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {
