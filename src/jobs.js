@@ -552,6 +552,12 @@ export class JobManager {
       `You are running unattended through the Claude Code Bridge (job ${job.id}) in an isolated git worktree of the repository "${job.project}". Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
       `This worktree contains committed state only: untracked files from the project's main checkout (local .env files, node_modules, build output) are absent. If the task needs dependencies to build or test, install them here first; if a local-only file the task needs is missing, say so in your summary instead of guessing.`,
       `Stay inside this worktree. Never print secrets, tokens, or the contents of .env files in your output.`,
+      // The budget is enforced by --max-budget-usd, which is a HARD cut the
+      // model cannot see coming: 20 jobs ran straight into it and died with
+      // nothing to show, $169.71 spent for zero deliverable, every one of them
+      // an execute-mode job on the expensive tier. Telling the agent the number
+      // converts "cut off mid-thought" into "wrapped up in time".
+      `You have a hard budget of $${Number(job.limits.max_cost_usd).toFixed(2)} for this job and a hard limit of ${job.limits.timeout_minutes} minutes. Both are enforced by killing the run — there is no grace period and no partial credit, so a job that spends everything investigating delivers nothing at all. Pace yourself against that: prefer landing a smaller, correct, well-explained result over an exhaustive one you do not finish. If you find yourself running long, stop exploring and write up what you have established, what you changed, and what remains — an honest partial answer is worth far more than being cut off mid-sentence.`,
     ];
     if (job.goal_id && this.goals) {
       const g = this.goals.goals.get(job.goal_id);
@@ -570,7 +576,15 @@ export class JobManager {
     }
     if (job.mode === 'plan') {
       lines.push(
-        `This is PLAN mode: investigate the codebase and produce a concrete, reviewable implementation plan as your final message — files to touch, the approach, risks, and how to verify. Do NOT modify any files and do NOT create branches or commits.`,
+        `This is PLAN mode: investigate the codebase and produce a concrete, reviewable implementation plan as your final message — files to touch, the approach, risks, and how to verify.`,
+        // Said explicitly because "do not modify any files" was read as "do not
+        // change the repo", leaving CREATING a new plan file apparently fair
+        // game. Write is not in this job's toolset, so the attempt always
+        // fails; 33 plan jobs burned turns discovering that independently, and
+        // several spent the discovery a second time after reading that an
+        // earlier agent had already hit it.
+        `The Edit, Write and NotebookEdit tools are NOT available to you in this job — not restricted, absent. Do not attempt to create, write or save ANY file, including a plan document, a scratch file, or notes: every such call will fail and the turn is wasted. Do not create branches or commits either.`,
+        `Your final message IS the deliverable. The bridge captures it verbatim and saves it as the plan file on your behalf, so anything you would have written to disk belongs in that message instead.`,
       );
     } else {
       lines.push(
