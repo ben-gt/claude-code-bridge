@@ -42,10 +42,11 @@ function pidAlive(pid) {
 }
 
 export class JobManager {
-  constructor(cfg, projectIndex, { log = console, goals = null, notify = null } = {}) {
+  constructor(cfg, projectIndex, { log = console, goals = null, notify = null, asker = null } = {}) {
     this.cfg = cfg;
     this.goals = goals;
     this.notify = notify;
+    this.asker = asker;
     this.projects = projectIndex;
     this.log = log;
     this.jobsDir = path.join(cfg.data_dir, 'jobs');
@@ -527,10 +528,69 @@ export class JobManager {
     if (job.goal_id && this.goals) {
       try {
         this.goals.appendFinding(job.goal_id, { job, text: job.result_text || job.error || '' });
-        this.goals.settle(job.goal_id, this.jobs);
+        if (this.goals.settle(job.goal_id, this.jobs) === 'awaiting_approval') {
+          // Unawaited on purpose: this blocks on a human, and finish() is on
+          // the job lifecycle path. Errors are contained inside.
+          this.superviseGoal(job.goal_id);
+        }
       } catch (e) { this.log.warn(`goal ${job.goal_id}: post-finish bookkeeping failed: ${e.message}`); }
     }
     setImmediate(() => this.pump());
+  }
+
+  /** Ask whether the held children should run, then act on the answer.
+   *
+   *  The question is deliberately asked AFTER the read-only wave has reported,
+   *  so the decision is made against what those children actually found rather
+   *  than against the plan that preceded them. Silence is never approval: an
+   *  unanswered question discards the held work, because a fan-out that
+   *  proceeds because nobody objected is not supervised, it is merely delayed.
+   */
+  async superviseGoal(goalId) {
+    try {
+      const g = this.goals.get(goalId);
+      const held = g.pending_jobs || [];
+      if (!held.length) return;
+      const spent = this.goals.spent(goalId, this.jobs);
+      const done = g.job_ids.map(id => this.jobs.get(id)).filter(Boolean);
+      const failed = done.filter(j => j.state !== 'completed').length;
+
+      if (!this.asker?.enabled) {
+        // No way to ask means no way to approve. Holding is the safe failure.
+        this.log.warn(`goal ${goalId}: held ${held.length} job(s) but supervision is not configured — not dispatching`);
+        this.notify?.post(`⚠ **${this.goals.label(goalId)}** — ${held.length} job(s) held, but no way to ask for approval. Nothing dispatched.`);
+        return;
+      }
+
+      const summary = `${done.length} read-only job(s) done${failed ? `, ${failed} failed` : ''} · $${spent.toFixed(2)} spent · ${held.length} change(s) ready`;
+      const answer = await this.asker.ask({
+        question: `${this.goals.label(goalId)} — run the ${held.length} job(s) that change things? (${summary})`,
+        options: ['Go ahead', 'Stop here'],
+        timeout_minutes: Number(this.cfg.goals?.approval_timeout_minutes ?? 60),
+        context: 'goal approval',
+      });
+
+      if (answer.status !== 'answered' || answer.choice === 'Stop here') {
+        const why = answer.status === 'answered' ? 'declined' : answer.status;
+        const n = this.goals.discardPending(goalId, why);
+        this.notify?.post(`◆ **${this.goals.label(goalId)}** stopped — ${n} job(s) not run (${why})`);
+        return;
+      }
+
+      // Anything other than "Stop here" that was actually answered proceeds,
+      // including free text — a person who replies at all has engaged with it.
+      const release = this.goals.releasePending(goalId);
+      this.notify?.post(`◆ **${this.goals.label(goalId)}** approved — dispatching ${release.length} job(s)`);
+      for (const c of release) {
+        try {
+          await this.start({ ...c, goal_id: goalId, chat_id: g.chat_id });
+        } catch (e) {
+          this.log.warn(`goal ${goalId}: held job for ${c.project} refused: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      this.log.error(`goal ${goalId}: supervision failed (${e.message})`);
+    }
   }
 
   // ---------- run ----------

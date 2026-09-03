@@ -129,9 +129,16 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
       })).min(1).max(12).describe('One entry per project. Ordered — earlier children record findings the later ones read.'),
       budget_usd: z.number().positive().optional().describe(`Ceiling for the WHOLE goal, not per job (default $${cfg.goals?.budget_usd ?? 25}). Dispatch stops once it is spent.`),
       chat_id: z.string().optional().describe('Injected automatically by the chat client so the live feed can link back here. Do not invent one.'),
+      supervise: z.boolean().optional().describe('Hold every execute-mode child until a human approves. The plan-mode children run first and report, then the bridge asks in the jobs channel and dispatches the rest only on a yes. Silence stops the goal — it never proceeds unanswered. Use this whenever the changes touch anything live.'),
     },
-  }, wrap(async ({ objective, jobs: children, budget_usd, chat_id }) => {
-    const goal = goals.create({ objective, budget_usd, chat_id });
+  }, wrap(async ({ objective, jobs: children, budget_usd, chat_id, supervise }) => {
+    // Under supervision the wave that only READS runs now; anything that
+    // changes things is held. Splitting on mode rather than asking the caller
+    // to mark each child keeps the decision in one place and makes the safe
+    // case the automatic one.
+    const held = supervise ? children.filter(c => (c.mode || 'plan') === 'execute') : [];
+    const firstWave = supervise ? children.filter(c => (c.mode || 'plan') !== 'execute') : children;
+    const goal = goals.create({ objective, budget_usd, chat_id, supervise, pending: held });
     // Announced before the children are dispatched, so the channel reads in the
     // order things actually happened rather than showing a goal appearing after
     // its own first job started.
@@ -141,7 +148,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
     // yet — and is resolved to ids as each child is created. A dependency on an
     // entry that was refused is dropped rather than stranding the dependent.
     const idByIndex = new Map();
-    for (const [i, c] of children.entries()) {
+    for (const [i, c] of firstWave.entries()) {
       const { depends_on: deps, ...rest } = c;
       const resolved = (deps || [])
         .filter(d => d < i)
@@ -154,8 +161,10 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
       } catch (e) { refused.push({ project: c.project, error: String(e.message || e) }); }
     }
     const clashes = started.filter(x => x.concurrent_on_project);
-    return ok({ goal_id: goal.id, objective: goal.objective, budget_usd: goal.budget_usd, started, refused },
+    return ok({ goal_id: goal.id, objective: goal.objective, budget_usd: goal.budget_usd, started, refused,
+      held_for_approval: held.length || undefined },
       `goal ${goal.id} created with ${started.length} job(s)${refused.length ? `, ${refused.length} refused` : ''} on a $${goal.budget_usd} budget.`
+      + (held.length ? ` ${held.length} change(s) are HELD — once the read-only jobs report, the bridge asks in the jobs channel and runs them only on approval. Tell the user to watch that channel.` : '')
       + (clashes.length ? ` ⚠ ${clashes.length} of them landed on a project that already had work in flight — say so before continuing.` : '')
       + ' Poll goal_status with this goal_id.');
   }, 'start_goal'));

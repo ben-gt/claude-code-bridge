@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const GOAL_STATES = ['active', 'completed', 'cancelled', 'exhausted'];
+export const GOAL_STATES = ['active', 'awaiting_approval', 'completed', 'cancelled', 'exhausted'];
 
 const nowIso = () => new Date().toISOString();
 const trunc = (s, n) => (String(s || '').length > n ? String(s).slice(0, n) + `\n…[truncated at ${n} chars]` : String(s || ''));
@@ -66,7 +66,7 @@ export class GoalManager {
     return g;
   }
 
-  create({ objective, budget_usd, chat_id }) {
+  create({ objective, budget_usd, chat_id, supervise = false, pending = [] }) {
     const budget = Number(budget_usd ?? this.cfg.goals?.budget_usd ?? 25);
     if (!Number.isFinite(budget) || budget <= 0) throw new Error('budget_usd must be a positive number');
     const goal = {
@@ -76,6 +76,12 @@ export class GoalManager {
       budget_usd: budget,
       job_ids: [],
       chat_id: chat_id || null,
+      // Supervision: children that change things are held back until a human
+      // says go. The first wave (read-only) runs, reports to the blackboard,
+      // and THEN the question is asked — so the decision is made against
+      // findings rather than against the plan that preceded them.
+      supervise: !!supervise,
+      pending_jobs: Array.isArray(pending) ? pending : [],
       created_at: nowIso(),
       finished_at: null,
     };
@@ -209,12 +215,43 @@ export class GoalManager {
     if (!g || g.state !== 'active' || !g.job_ids.length) return;
     const jobs = g.job_ids.map(id => jobsById.get(id)).filter(Boolean);
     if (jobs.some(j => j.state === 'queued' || j.state === 'running')) return;
+    // Held children and nobody has approved them yet: the goal is not finished,
+    // it is waiting on a person. Returning the signal rather than asking here
+    // keeps this class free of the channel and the job runner.
+    if (g.supervise && g.pending_jobs.length) {
+      g.state = 'awaiting_approval';
+      this.save(g);
+      this.log.info(`goal ${g.id} awaiting approval for ${g.pending_jobs.length} held job(s)`);
+      return 'awaiting_approval';
+    }
     g.state = 'completed';
     g.finished_at = nowIso();
     this.save(g);
     const spent = this.spent(goalId, jobsById);
     this.log.info(`goal ${g.id} completed: ${jobs.length} job(s), $${spent.toFixed(2)}`);
     try { this.notify?.goalFinished(g, { counts: this.status(goalId, jobsById).counts, spent }); } catch { /* never fail on bookkeeping */ }
+  }
+
+  /** Release the held children for dispatch; they are returned once only. */
+  releasePending(goalId) {
+    const g = this.get(goalId);
+    const pending = g.pending_jobs || [];
+    g.pending_jobs = [];
+    g.state = 'active';
+    this.save(g);
+    return pending;
+  }
+
+  /** Drop the held children without running them. */
+  discardPending(goalId, why) {
+    const g = this.get(goalId);
+    const n = (g.pending_jobs || []).length;
+    g.pending_jobs = [];
+    g.state = 'cancelled';
+    g.finished_at = nowIso();
+    this.save(g);
+    this.log.info(`goal ${g.id}: ${n} held job(s) discarded (${why})`);
+    return n;
   }
 
   cancel(goalId) {

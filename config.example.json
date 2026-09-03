@@ -121,7 +121,8 @@
   },
   "goals": {
     "_comment": "Goals group jobs across projects under one objective, one budget and one shared findings record. budget_usd covers ALL children together and is checked before each dispatch.",
-    "budget_usd": 25
+    "budget_usd": 25,
+    "approval_timeout_minutes": 60
   },
   "notify": {
     "_comment": "Live job/goal state posted to an Open WebUI channel. Create a channel, add a webhook, and put the full URL in config.local.json (gitignored) \u2014 it carries a token. Format: http://HOST/api/v1/channels/webhooks/<webhook_id>/<token> chat_base_url is the chat UI origin (e.g. https://chat.example.com) so feed lines can link back to the conversation. api_key + channel_id additionally enable ASKING the user a question in the channel and waiting for a reply (an Open WebUI API key that can read the channel). Both belong in config.local.json.",

@@ -99,6 +99,9 @@ export const DEFAULTS = {
   // ceiling is eight times that ceiling, which is not a limit anyone chose.
   goals: {
     budget_usd: 25,
+    // How long a supervised goal waits for a yes before discarding its held
+    // work. Silence is never approval.
+    approval_timeout_minutes: 60,
   },
   // Live job state pushed to an Open WebUI channel. Open WebUI emits a channel
   // message over its socket the moment it lands, so this is real push with no

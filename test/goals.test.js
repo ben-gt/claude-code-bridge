@@ -137,3 +137,41 @@ test('harness apologies never reach the board', () => {
   assert.doesNotMatch(bb, /Write tool is not available/);
   assert.match(bb, /The real finding is here/);
 });
+
+test('a supervised goal holds its changes and waits rather than completing', () => {
+  const g = mk();
+  const goal = g.create({
+    objective: 'Roll passkeys out',
+    supervise: true,
+    pending: [{ project: 'bnd-flux', prompt: 'do it', mode: 'execute' }],
+  });
+  g.attach(goal.id, 'j_a');
+  const jobs = new Map([['j_a', job({ id: 'j_a' })]]);
+
+  assert.equal(g.settle(goal.id, jobs), 'awaiting_approval');
+  assert.equal(g.get(goal.id).state, 'awaiting_approval', 'not completed — waiting on a person');
+
+  const released = g.releasePending(goal.id);
+  assert.equal(released.length, 1);
+  assert.equal(g.get(goal.id).state, 'active');
+  assert.deepEqual(g.get(goal.id).pending_jobs, [], 'released once only');
+  // With nothing held, the goal is free to finish.
+  assert.equal(g.settle(goal.id, jobs), undefined);
+  assert.equal(g.get(goal.id).state, 'completed');
+});
+
+test('declining discards the held work instead of running it', () => {
+  const g = mk();
+  const goal = g.create({ objective: 'o', supervise: true, pending: [{ project: 'p' }, { project: 'q' }] });
+  assert.equal(g.discardPending(goal.id, 'timed_out'), 2);
+  assert.equal(g.get(goal.id).state, 'cancelled');
+  assert.deepEqual(g.get(goal.id).pending_jobs, []);
+});
+
+test('an unsupervised goal is unaffected', () => {
+  const g = mk();
+  const goal = g.create({ objective: 'o' });
+  g.attach(goal.id, 'j_a');
+  assert.equal(g.settle(goal.id, new Map([['j_a', job({ id: 'j_a' })]])), undefined);
+  assert.equal(g.get(goal.id).state, 'completed');
+});

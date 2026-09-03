@@ -10,6 +10,7 @@ import { ProjectIndex } from './projects.js';
 import { JobManager } from './jobs.js';
 import { GoalManager } from './goals.js';
 import { Notifier } from './notify.js';
+import { Asker } from './ask.js';
 import { registerTools } from './tools.js';
 import { addSecret, scrub } from './scrub.js';
 import { cleanCloneTemp } from './clone.js';
@@ -55,7 +56,8 @@ async function main() {
   const notify = new Notifier(cfg, { log });
   const goals = new GoalManager(cfg, { log, notify });
   goals.init();
-  const jobs = new JobManager(cfg, projects, { log, goals, notify });
+  const asker = new Asker(cfg, notify, { log });
+  const jobs = new JobManager(cfg, projects, { log, goals, notify, asker });
   jobs.init();
   cleanCloneTemp(cfg);
   const self = await detectSelfComposeProject();
