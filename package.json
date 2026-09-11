@@ -1,7 +1,7 @@
 {
-  "name": "claude-code-bridge",
+  "name": "code-bridge",
   "version": "0.1.0",
-  "description": "MCP server that exposes Claude Code (headless) over Streamable HTTP for projects under ~/code",
+  "description": "MCP server that runs Claude Code and OpenAI Codex tasks over Streamable HTTP for projects under ~/code",
   "type": "module",
   "private": true,
   "main": "src/index.js",

@@ -1,17 +1,18 @@
 {
   "_comment": "Copy to config.json (or config.local.json for machine-local tweaks, which is gitignored and merged on top). Every key is optional; defaults live in src/config.js.",
   "workspace_root": "~/code",
-  "data_dir": "~/.local/share/claude-code-bridge",
+  "data_dir": "~/.local/share/code-bridge",
   "server": {
     "host": "0.0.0.0",
     "port": 4010,
-    "token_file": "~/.config/claude-code-bridge/token"
+    "token_file": "~/.config/code-bridge/token"
   },
   "discovery": {
     "_comment": "depth 1 = direct children of workspace_root. Raise it if you nest by owner (~/code/<owner>/<repo>). Directory names in exclusions are skipped at any depth; names starting with '.' are always skipped.",
     "depth": 1,
     "exclusions": [
       "node_modules",
+      "code-bridge",
       "claude-code-bridge",
       "archive"
     ]
@@ -48,11 +49,11 @@
     "bin": "claude",
     "extra_args": [],
     "branch_prefix": "bridge/",
-    "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>",
+    "commit_author": "Code Bridge <code-bridge@localhost>",
     "subagent_model": "claude-haiku-4-5",
     "disable_nonessential_traffic": true
   },
-  "default_engine": "claude",
+  "default_engine": "codex",
   "codex": {
     "_comment": "OpenAI Codex CLI as a second engine (start_task engine: \"codex\"). api_key: empty = use the host's `codex login` (~/.codex/auth.json); a key here is passed as CODEX_API_KEY (codex exec ignores OPENAI_API_KEY) and belongs in config.local.json. execute_sandbox: danger-full-access (like Claude's bypassPermissions: installs deps, runs tests, commits) or workspace-write (worktree-only writes, no network, .git read-only so the bridge commits for the agent); plan jobs are always read-only. tiers use the same names as models.tiers. pricing: USD per million tokens per model id - Codex reports tokens, never cost, so without an entry a job's cost is unknown and counts as $0 against a goal budget.",
     "bin": "codex",
@@ -118,6 +119,7 @@
       "openui",
       "form-submissions",
       "dms-v3-form-submissions",
+      "code-bridge",
       "claude-code-bridge"
     ],
     "redeploy_timeout_minutes": 15,

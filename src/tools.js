@@ -6,6 +6,7 @@ import { scrub, scrubDeep } from './scrub.js';
 import { resolveProjectDir } from './paths.js';
 import { git, run, workingTreeStatus, currentBranchFast, hasRemote } from './git.js';
 import { cloneProject, listAvailableRepos } from './clone.js';
+import { engineGuidance } from './models.js';
 import { resolveComposeTarget, composeStatus, composeLogs, compose, validateServices, composeConfig, isProtected, protectedList } from './compose.js';
 
 function ok(data, text) {
@@ -84,14 +85,14 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
   }, wrap(async args => ok(await listAvailableRepos(cfg, args)), 'list_available_repos'));
 
   server.registerTool('start_task', {
-    title: 'Start a Claude Code task',
-    description: `Dispatch a natural-language task to Claude Code (headless) — or to the OpenAI Codex CLI with engine "codex" — in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Every job runs in a disposable git worktree: the project checkout is never touched, a dirty checkout does not block anything (its uncommitted changes are simply invisible to the job), and multiple jobs may run on one project. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}). Codex reports tokens rather than dollars, so for a Codex job only the timeout is a hard bound — the reply says so in cost_note.`,
+    title: 'Start a Code Bridge task',
+    description: `Dispatch a natural-language task to the OpenAI Codex CLI or Claude Code in a project. ${engineGuidance(cfg)} Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), runs the selected engine, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Every job runs in a disposable git worktree: the project checkout is never touched, a dirty checkout does not block anything (its uncommitted changes are simply invisible to the job), and multiple jobs may run on one project. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}). Codex reports tokens rather than dollars, so for a Codex job only the timeout is a hard bound — the reply says so in cost_note.`,
     inputSchema: {
       project: z.string().describe('Project name as shown by list_projects'),
       prompt: z.string().describe('What to do, in natural language'),
       mode: z.enum(['plan', 'execute']).optional().describe('plan (default, read-only) or execute'),
-      agent: z.string().optional().describe('Name of a project agent from .claude/agents to run as (Claude engine only)'),
-      engine: z.enum(['claude', 'codex']).optional().describe(`Which CLI runs the job: "claude" (Claude Code) or "codex" (OpenAI Codex CLI). Default "${cfg.default_engine || 'claude'}". Same worktree, branch, draft PR and plan/execute rules either way. Only set it when the user asks for Codex or for a second opinion from a different model family.`),
+      agent: z.string().optional().describe('Name of a project agent from .claude/agents. Selects Claude unless an explicit engine or engine-specific model takes precedence; incompatible Codex requests are refused.'),
+      engine: z.enum(['claude', 'codex']).optional().describe(engineGuidance(cfg)),
       base_branch: z.string().optional().describe('Branch to start from (defaults to the project default branch)'),
       max_cost_usd: z.number().positive().optional().describe('Override the cost ceiling for this job (default is per model tier)'),
       timeout_minutes: z.number().positive().max(180).optional().describe('Override the hard timeout for this job'),
@@ -113,14 +114,14 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
 
   server.registerTool('start_goal', {
     title: 'Start a goal',
-    description: `Create a GOAL: one objective pursued by several jobs across several projects, sharing one budget and one findings record. Use this instead of repeated start_task when a single outcome spans more than one repository ("get passkeys working on every portal"). Children do not talk to each other — each reads every earlier child's findings when it starts, and its final message is appended for the ones that follow, so order matters: put the job others depend on first. The goal budget covers ALL children together and is checked before each dispatch, so the fan-out stops when the money runs out rather than after. Returns the goal_id and the dispatched jobs; poll goal_status.`,
+    description: `Create a GOAL: one objective pursued by several jobs across several projects, sharing one budget and one findings record. Use this instead of repeated start_task when a single outcome spans more than one repository ("get passkeys working on every portal"). ${engineGuidance(cfg)} Children do not talk to each other — each reads every earlier child's findings when it starts, and its final message is appended for the ones that follow, so order matters: put the job others depend on first. The goal budget covers ALL children together and is checked before each dispatch, so the fan-out stops when the money runs out rather than after. Returns the goal_id and the dispatched jobs; poll goal_status.`,
     inputSchema: {
       objective: z.string().describe('The outcome, in one or two sentences. Every child sees this verbatim.'),
       jobs: z.array(z.object({
         project: z.string().describe('Project name as shown by list_projects'),
         prompt: z.string().describe("This child's slice of the objective"),
         mode: z.enum(['plan', 'execute']).optional(),
-        engine: z.enum(['claude', 'codex']).optional(),
+        engine: z.enum(['claude', 'codex']).optional().describe(engineGuidance(cfg)),
         model: z.string().optional(),
         complexity: z.enum(['low', 'normal', 'high']).optional(),
         effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
@@ -260,7 +261,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
 
   server.registerTool('list_jobs', {
     title: 'List recent jobs',
-    description: 'Recent jobs (Claude Code tasks and compose redeploys) with state, project, model and a one-line summary. Filter by project or state.',
+    description: 'Recent jobs (Claude Code, Codex, and compose redeploys) with state, project, model and a one-line summary. Filter by project or state.',
     inputSchema: {
       limit: z.number().int().min(1).max(200).optional(),
       project: z.string().optional(),

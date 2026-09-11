@@ -2,6 +2,7 @@
 // just applies it and explains the choice. Canonical ids were confirmed against Claude Code 2.1.251:
 //   --model opus  -> claude-opus-5      --model fable -> claude-fable-5-1
 // Claude Code accepts those aliases too, but config should carry the canonical ids.
+import { DEFAULTS } from './config.js';
 
 const FILE_RE = /(?:^|[\s`'"(,])((?:[\w.@-]+\/)+[\w.@-]+|[\w@-]+\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|swift|md|json|ya?ml|toml|css|scss|html|sql|sh|env|lock|prisma|vue|svelte))(?=$|[\s`'")\],:;])/g;
 
@@ -15,12 +16,12 @@ export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const ENGINES = ['claude', 'codex'];
 
 /**
- * Which CLI runs the job: explicit engine > a model that only a Codex tier
- * names (or that is plainly an OpenAI id) > project override > default_engine.
+ * Which CLI runs the job: explicit engine > engine-specific model > named
+ * Claude agent > project override > default_engine (Codex).
  * Tier NAMES are shared by both engines, so `model: "complex"` alone never
  * switches engine — only a model id or alias can.
  */
-export function resolveEngine(cfg, { engine = null, explicitModel = null, projectOverrides = {} } = {}) {
+export function resolveEngine(cfg, { engine = null, explicitModel = null, agent = null, projectOverrides = {} } = {}) {
   // Checked wherever it comes from: a typo in config would otherwise run Claude
   // while every record claimed a different engine.
   const valid = (e, where) => {
@@ -31,12 +32,22 @@ export function resolveEngine(cfg, { engine = null, explicitModel = null, projec
   if (explicitModel) {
     const m = String(explicitModel).trim();
     const names = tiers => Object.values(tiers || {}).some(t => t.model === m || (t.aliases || []).includes(m));
-    const claude = names(cfg.models?.tiers) || !!cfg.models?.tiers?.[m];
-    if (!claude && names(cfg.codex?.tiers)) return { engine: 'codex', reason: `model "${m}" is a Codex tier` };
-    if (!claude && /^(gpt-|o\d)/i.test(m)) return { engine: 'codex', reason: `model "${m}" is an OpenAI model` };
+    // Tier keys are engine-neutral; aliases and model IDs can select an engine.
+    if (!cfg.models?.tiers?.[m] && !cfg.codex?.tiers?.[m]) {
+      const claude = names(cfg.models?.tiers), codex = names(cfg.codex?.tiers);
+      if (claude && !codex) return { engine: 'claude', reason: `model "${m}" is a Claude tier` };
+      if (codex && !claude) return { engine: 'codex', reason: `model "${m}" is a Codex tier` };
+      if (!claude && !codex && /^(gpt-|o\d)/i.test(m)) return { engine: 'codex', reason: `model "${m}" is an OpenAI model` };
+      if (!claude && !codex && /^claude-/i.test(m)) return { engine: 'claude', reason: `model "${m}" is a Claude model` };
+    }
   }
+  if (agent) return { engine: 'claude', reason: 'named .claude/agents agent' };
   if (projectOverrides.engine) return { engine: valid(projectOverrides.engine, 'projects.<name>.engine'), reason: 'project engine override' };
-  return { engine: valid(cfg.default_engine || 'claude', 'default_engine'), reason: 'default engine' };
+  return { engine: valid(cfg.default_engine || DEFAULTS.default_engine, 'default_engine'), reason: 'default engine' };
+}
+
+export function engineGuidance(cfg) {
+  return `Prefer the configured default engine "${resolveEngine(cfg).engine}" for start_task and every start_goal child. Omit engine and model to use automatic routing and tier selection. Use Claude when explicitly requested, when a project requires it, when using a named .claude/agents agent, or for an intentional second opinion. Generic tier names (fast, default, complex) do not change engines. Codex jobs report tokens; dollar costs are estimates only when pricing is configured.`;
 }
 
 /**

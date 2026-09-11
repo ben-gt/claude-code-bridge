@@ -12,16 +12,16 @@ export const DEFAULTS = {
   // Hard workspace boundary. Everything the bridge touches must resolve inside this.
   workspace_root: path.join(os.homedir(), 'code'),
   // Where job records, logs and the server token live (outside the repo).
-  data_dir: path.join(os.homedir(), '.local', 'share', 'claude-code-bridge'),
+  data_dir: path.join(os.homedir(), '.local', 'share', 'code-bridge'),
   server: {
     host: '0.0.0.0',
     port: 4010,
     // Path to a file containing the bearer token (0600). Created on first start if missing.
-    token_file: path.join(os.homedir(), '.config', 'claude-code-bridge', 'token'),
+    token_file: path.join(os.homedir(), '.config', 'code-bridge', 'token'),
   },
   discovery: {
     depth: 1,
-    exclusions: ['node_modules'],
+    exclusions: ['node_modules', 'code-bridge', 'claude-code-bridge'],
     // Directories starting with '.' are always skipped.
   },
   limits: {
@@ -49,7 +49,7 @@ export const DEFAULTS = {
     // Branch prefix for execute-mode jobs.
     branch_prefix: 'bridge/',
     // Commit author used for any leftover-work commit the bridge makes itself.
-    commit_author: 'Claude Code Bridge <claude-code-bridge@localhost>',
+    commit_author: 'Code Bridge <code-bridge@localhost>',
     // Model for subagents a job spawns. Subagents otherwise INHERIT the parent
     // model, so a codebase sweep under an Opus job runs at Opus latency and
     // Opus prices to do grep-shaped work. CLAUDE_CODE_SUBAGENT_MODEL overrides
@@ -61,7 +61,7 @@ export const DEFAULTS = {
     disable_nonessential_traffic: true,
   },
   // Which CLI runs a job when the caller does not say: 'claude' or 'codex'.
-  default_engine: 'claude',
+  default_engine: 'codex',
   // OpenAI Codex CLI as a second engine (start_task engine: "codex"). Same
   // worktrees, branches, draft PRs, goals and transcripts as a Claude job; only
   // the process underneath differs. See src/codex.js for what was verified.
@@ -165,7 +165,7 @@ export const DEFAULTS = {
   compose: {
     // Compose projects (directory name OR compose project name) the bridge refuses to touch.
     // The stack that serves the chat UI and the other MCP servers on this box are protected by default.
-    protected: ['openui', 'form-submissions', 'dms-v3-form-submissions', 'claude-code-bridge'],
+    protected: ['openui', 'form-submissions', 'dms-v3-form-submissions', 'code-bridge', 'claude-code-bridge'],
     redeploy_timeout_minutes: 15,
     restart_timeout_seconds: 180,
     logs_default_lines: 200,
@@ -206,9 +206,19 @@ export function loadConfig(overridePath = process.env.BRIDGE_CONFIG) {
   cfg.workspace_root = path.resolve(expandHome(cfg.workspace_root));
   cfg.data_dir = path.resolve(expandHome(cfg.data_dir));
   cfg.server.token_file = path.resolve(expandHome(cfg.server.token_file));
+  // Existing installations keep their history and bearer token. Only the new
+  // conventional defaults can fall back; explicit custom paths stay untouched.
+  cfg.data_dir = existingBridgePath(cfg.data_dir, '.local/share/code-bridge', '.local/share/claude-code-bridge');
+  cfg.server.token_file = existingBridgePath(cfg.server.token_file, '.config/code-bridge/token', '.config/claude-code-bridge/token');
   if (process.env.BRIDGE_PORT) cfg.server.port = Number(process.env.BRIDGE_PORT);
   if (process.env.BRIDGE_HOST) cfg.server.host = process.env.BRIDGE_HOST;
   return cfg;
+}
+
+export function existingBridgePath(configured, current, legacy, home = os.homedir()) {
+  if (configured !== path.join(home, current) || fs.existsSync(configured)) return configured;
+  const old = path.join(home, legacy);
+  return fs.existsSync(old) ? old : configured;
 }
 
 export function projectOverrides(cfg, name) {

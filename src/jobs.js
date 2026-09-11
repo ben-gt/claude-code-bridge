@@ -332,7 +332,7 @@ export class JobManager {
     const name = path.relative(fs.realpathSync(this.cfg.workspace_root), dir);
     const ov = projectOverrides(this.cfg, name);
     const setup = detectClaudeSetup(dir);
-    const eng = resolveEngine(this.cfg, { engine, explicitModel: model, projectOverrides: ov });
+    const eng = resolveEngine(this.cfg, { engine, explicitModel: model, agent, projectOverrides: ov });
     const codex = eng.engine === 'codex';
     if (agent && codex) throw new Error(`agent "${agent}" is a Claude Code subagent (.claude/agents) and cannot run under engine "codex" — drop agent, or use engine "claude"`);
     if (agent && !setup.agents.some(a => a.name === agent)) {
@@ -723,7 +723,7 @@ export class JobManager {
       '--- END SHARED DEVELOPMENT GUIDELINES ---',
       `Apply these shared defaults alongside the target project's instructions. More specific project conventions take precedence over shared defaults; the bridge job constraints below take precedence over conflicting development workflow instructions.`,
       '',
-      `You are running unattended through the Claude Code Bridge (job ${job.id}) in an isolated git worktree of the repository "${job.project}". Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
+      `You are running unattended through the Code Bridge (job ${job.id}) in an isolated git worktree of the repository "${job.project}". Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
       `This worktree contains committed state only: untracked files from the project's main checkout (local .env files, node_modules, build output) are absent. If the task needs dependencies to build or test, install them here first; if a local-only file the task needs is missing, say so in your summary instead of guessing.`,
       `Stay inside this worktree. Never print secrets, tokens, or the contents of .env files in your output.`,
       // The budget is enforced by --max-budget-usd, which is a HARD cut the
@@ -789,7 +789,8 @@ export class JobManager {
         // Claude Code refuses bypassPermissions as root unless it believes it's sandboxed.
         IS_SANDBOX: '1',
         GIT_TERMINAL_PROMPT: '0',
-        CLAUDE_CODE_BRIDGE_JOB: job.id,
+        CODE_BRIDGE_JOB: job.id,
+        CLAUDE_CODE_BRIDGE_JOB: job.id, // Compatibility for existing project hooks.
       };
       // Subagents INHERIT the parent model unless told otherwise, so a
       // codebase sweep under an Opus job does grep-shaped work at Opus latency.
@@ -1020,7 +1021,7 @@ export class JobManager {
     }
     const title = trunc(job.summary, 70);
     const body = [
-      `Draft PR opened by Claude Code Bridge (job \`${job.id}\`).`, '',
+      `Draft PR opened by Code Bridge (job \`${job.id}\`).`, '',
       '**Task**', '', '```', trunc(job.prompt, 2000), '```', '',
       '**Agent summary**', '', trunc(job.result_text || '(none)', 6000), '',
       `Session: \`${job.session_id || '?'}\` · model: ${job.model || '?'} · cost: $${job.cost_usd ?? '?'} · Not merged automatically — human review required.`,
@@ -1238,5 +1239,5 @@ function accumulateUsage(acc, u) {
     cache_read_input_tokens: (acc.cache_read_input_tokens || 0) + p.cache_read_input_tokens,
   };
 }
-function authorName(cfg) { return (cfg.claude.commit_author || 'Claude Code Bridge <bridge@localhost>').replace(/\s*<.*$/, ''); }
-function authorEmail(cfg) { const m = (cfg.claude.commit_author || '').match(/<([^>]+)>/); return m ? m[1] : 'claude-code-bridge@localhost'; }
+function authorName(cfg) { return (cfg.claude.commit_author || 'Code Bridge <bridge@localhost>').replace(/\s*<.*$/, ''); }
+function authorEmail(cfg) { const m = (cfg.claude.commit_author || '').match(/<([^>]+)>/); return m ? m[1] : 'code-bridge@localhost'; }

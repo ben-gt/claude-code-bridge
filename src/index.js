@@ -1,4 +1,4 @@
-// Claude Code Bridge — MCP server (Streamable HTTP) exposing Claude Code headless for ~/code.
+// Code Bridge — MCP server (Streamable HTTP) running Claude Code and OpenAI Codex for ~/code.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -16,6 +16,7 @@ import { addSecret, scrub } from './scrub.js';
 import { cleanCloneTemp } from './clone.js';
 import { detectSelfComposeProject, dockerAvailable, protectedList } from './compose.js';
 import { describeCodex } from './codex.js';
+import { engineGuidance } from './models.js';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
 
@@ -34,7 +35,7 @@ function loadOrCreateToken(file) {
     if (e.code !== 'ENOENT') throw e;
   }
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const t = `ccb_${randomBytes(32).toString('base64url')}`;
+  const t = `cb_${randomBytes(32).toString('base64url')}`;
   fs.writeFileSync(file, t + '\n', { mode: 0o600 });
   fs.chmodSync(file, 0o600);
   log.info(`generated new bearer token at ${file}`);
@@ -82,7 +83,7 @@ async function main() {
     const h = req.headers.authorization || '';
     const m = h.match(/^Bearer\s+(.+)$/i);
     if (!m || !constantTimeEq(m[1].trim(), token)) {
-      res.set('WWW-Authenticate', 'Bearer realm="claude-code-bridge"');
+      res.set('WWW-Authenticate', 'Bearer realm="code-bridge"');
       return res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'unauthorized' }, id: null });
     }
     next();
@@ -90,12 +91,12 @@ async function main() {
 
   // Stateless transport: one McpServer+transport per request, no session bookkeeping to lose on restart.
   const handle = async (req, res) => {
-    const server = new McpServer({ name: 'claude-code-bridge', version: VERSION }, { instructions: [
-      `Claude Code Bridge: dispatches engineering tasks to Claude Code (headless) against repositories under ${cfg.workspace_root}, and clones new ones.`,
+    const server = new McpServer({ name: 'code-bridge', version: VERSION }, { instructions: [
+      `Code Bridge: dispatches engineering tasks to Claude Code or OpenAI Codex against repositories under ${cfg.workspace_root}, and clones new ones.`,
       'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Nothing is ever merged automatically.',
       'Jobs run in disposable git worktrees: a dirty checkout never blocks a job and jobs never touch the checkout. Deploying a stack that builds from its checkout: merge the PR, update_checkout, compose_redeploy (projects carry a note in list_projects when this applies).',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
-      'Engines: jobs run on Claude Code by default. Pass engine "codex" to start_task (or a Codex model such as "codex") to run the same job on the OpenAI Codex CLI; Codex jobs report tokens, not dollars.',
+      engineGuidance(cfg),
     ].join('\n') });
     registerTools(server, { cfg, projects, jobs, goals, notify, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -113,7 +114,7 @@ async function main() {
   app.delete('/mcp', (_req, res) => res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'stateless server' }, id: null }));
 
   const httpServer = app.listen(cfg.server.port, cfg.server.host, () => {
-    log.info(`claude-code-bridge v${VERSION} listening on http://${cfg.server.host}:${cfg.server.port}/mcp (workspace ${cfg.workspace_root}, data ${cfg.data_dir})`);
+    log.info(`code-bridge v${VERSION} listening on http://${cfg.server.host}:${cfg.server.port}/mcp (workspace ${cfg.workspace_root}, data ${cfg.data_dir})`);
   });
 
   const shutdown = sig => {

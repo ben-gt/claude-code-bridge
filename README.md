@@ -1,12 +1,12 @@
-# Claude Code Bridge
+# Code Bridge
 
 An MCP server (Streamable HTTP) that exposes **Claude Code in headless mode** — and, per job, the **OpenAI Codex CLI** — to chat surfaces such as Open WebUI, so engineering tasks can be dispatched against any git repository under `~/code` — and new repos pulled down — without opening a terminal.
 
-It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, adapts to whatever `.claude` setup a repo has, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and **never merges anything**.
+It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, loads shared guidelines and project instructions for either engine, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and **never merges anything**.
 
 - Port: **4010** (near the other MCP servers on this box: 3001, 4005). Endpoint: `POST /mcp`. Health: `GET /health`.
 - Auth: **Bearer token** — the same scheme as the other MCP connections registered in Open WebUI.
-- Process manager: **systemd** (`claude-code-bridge.service`, restart-on-failure), like `code-server.service` on this machine. It needs the host's `~/.claude` login and `~/code`, which is why it runs on the host rather than in compose.
+- Process manager: **systemd** (`code-bridge.service`, restart-on-failure), like `code-server.service` on this machine. It uses the host's Claude Code or Codex login and `~/code`, which is why it runs on the host rather than in compose.
 - Workspace root and hard boundary: `~/code` (configurable). Every path is checked *after* realpath resolution.
 
 ## Tool surface
@@ -16,11 +16,11 @@ It is general-purpose infrastructure: it knows nothing about any particular proj
 | `list_projects` | Rescan `~/code` and list every git repo: name, current/default branch, remote (creds stripped), dirty flag, `.claude` setup (CLAUDE.md / preflight / agents), agent names, compose file names. Compact by default (~16 KB for 60 repos); `verbose=true` adds paths, agent descriptions and compose metadata. Optional `filter`. |
 | `clone_project` | Clone into `~/code/<name>` using the stored git credentials. Args: `url` **or** `repo` (`owner/repo` + optional `host`), optional `name`, `branch`, `depth`, `full_history`. Shallow by default. Never overwrites — an existing dir returns its path untouched. |
 | `list_available_repos` | Repos visible to the stored credentials on each configured host (GitHub, Gitea, GitLab). Marks ones already cloned. Args: `host`, `query`, `limit`. |
-| `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `engine` (`claude` default \| `codex`), `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
+| `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `engine` (`codex` default \| `claude`), `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
 | `get_task_status` | State, elapsed, current activity, branch, PR URL, model, cost, final result / plan text. **Long-polls while a job is active** (`wait_seconds`, default 20, max 50): one call waits for the next state/activity change instead of the caller spinning. Running jobs get a lean payload (~350 bytes); the full record arrives when the job ends. |
 | `get_task_log` | Scrubbed human-readable transcript; `offset` → `next_offset` for incremental polling; `raw=true` for the stream-json events. |
 | `cancel_task` | Kill a queued/running job. Default: discard uncommitted agent work, restore the original branch, delete the job branch. `keep_branch=true` commits partial work and keeps the branch. |
-| `list_jobs` | Recent jobs (Claude tasks and compose redeploys) with state, project, model, one-line summary. Filter by `project` / `state`. |
+| `list_jobs` | Recent jobs (Claude Code, Codex, and compose redeploys) with state, project, model, one-line summary. Filter by `project` / `state`. |
 | `compose_status` | `docker compose ps` — services, state, health, ports, uptime. Read-only, works on protected stacks too. |
 | `compose_logs` | Tail container logs (`services`, `lines`, `since`). Scrubbed. Read-only. |
 | `compose_restart` | `docker compose restart` — no pull, no build. Returns service state before and after. |
@@ -33,13 +33,13 @@ Job states: `queued → running → completed | failed | cancelled | interrupted
 
 ### How a task runs
 
-1. Pre-flight (synchronous, before Claude is invoked): project must resolve inside `~/code`; one active job per project; **dirty working tree is refused** (untracked files count unless `allow_untracked` is set for the project); `agent` must exist in `.claude/agents/`.
-2. `plan` mode: `claude -p … --permission-mode plan` with edit tools disallowed. No branch, no commits. The plan is the final message (`result` in status, and `plan.md` in the job dir).
-3. `execute` mode: record the current branch → `git fetch origin <default>` (if a remote) → `git checkout -b bridge/<slug>-<id> origin/<default>` (or local default) → run `claude -p … --permission-mode bypassPermissions` with an appended system prompt (stay on branch, commit as you go, don't push/merge/force; run `.claude/preflight.md` if present) → commit any leftovers (`chore(bridge): …`) → if a remote: `git push -u origin <branch>` (never force) and open a **draft PR** through the host API → switch the working tree back to the original branch. No remote: the local branch name is reported. If no commits were produced the empty branch is removed.
-4. Bounded by a hard timeout (`job_timeout_minutes`, default 20 — process group killed, partial work committed to the branch) and a cost ceiling (`--max-budget-usd`, default $5 — Claude stops itself and the job is `failed` with the reason).
-5. Concurrency: `max_concurrent_jobs` (default 2) global; extra jobs queue. One job per project.
+1. Pre-flight: resolve the project inside the workspace boundary, validate the selected engine and optional agent, and queue the job within the global concurrency limit.
+2. Every job gets a disposable git worktree. The project's original checkout stays untouched; uncommitted and untracked files are absent from the job. Multiple jobs can run on a project.
+3. `plan` mode: investigate a detached snapshot using the selected engine's read-only restrictions. The final response is captured as `plan.md`; no branches or commits are created.
+4. `execute` mode: fetch the base branch when a remote exists, create a fresh `bridge/…` branch in a worktree, run the selected engine, and commit remaining changes. Push and open a draft PR when a remote exists; otherwise report the local branch. The bridge never merges. Empty branches are removed.
+5. Every job has a hard timeout. Claude also receives a dollar budget; Codex reports token usage, with estimated costs when pricing is configured. See [Codex engine](#codex-engine) for its sandbox and cost behavior.
 
-Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents and skills itself — the bridge doesn't strip any of that; it only layers the unattended-run rules on top via `--append-system-prompt`. Projects with no `.claude` setup run plainly.
+Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents and skills itself — the bridge doesn't strip any of that; it only layers the unattended-run rules on top via `--append-system-prompt`. Projects with no `.claude` setup still receive the shared guidelines.
 
 Every Claude and Codex job also receives the bridge installation's [AGENTS.md](AGENTS.md), including shared development, DRY, and adapted JPL Power of Ten guidance. The bridge reads this file when building each job's instructions, independently of the target repository or disposable worktree. Claude receives it through `--append-system-prompt`; Codex receives it through `developer_instructions`. Project-specific conventions take precedence over shared defaults; bridge job constraints (such as plan mode and branch handling) take precedence over conflicting workflow instructions. Missing, unreadable, or empty shared guidelines prevent the job from launching. Once this integration is running, edits to the file apply to subsequent jobs without restarting the service; already-running jobs keep their original instructions.
 
@@ -47,20 +47,20 @@ Codex jobs (`engine: "codex"`) go through the same steps with `codex exec` in pl
 
 ### Where things live
 
-- Repo: `~/code/claude-code-bridge` (excluded from discovery by config).
-- Data: `~/.local/share/claude-code-bridge/jobs/<job_id>/{job.json,transcript.log,stream.jsonl,plan.md}` — flat JSON, survives restarts. The last 500 jobs are kept.
-- Token: `~/.config/claude-code-bridge/token` (0600, generated on first start).
+- Repo: `~/code/code-bridge` for new checkouts; existing checkouts can keep their directory name. Both `code-bridge` and `claude-code-bridge` are excluded from discovery by config.
+- Data: `~/.local/share/code-bridge/jobs/<job_id>/{job.json,transcript.log,stream.jsonl,plan.md}` — flat JSON, survives restarts. The last 500 jobs are kept.
+- Token: `~/.config/code-bridge/token` (0600, generated on first start).
 
 ## Install / run
 
 ```sh
-cd ~/code/claude-code-bridge
+cd ~/code/code-bridge
 npm install
 npm test                      # unit tests: scrubbing, path guards, clone source parsing
-scripts/install.sh            # writes /etc/systemd/system/claude-code-bridge.service, enables + starts it
+scripts/install.sh            # writes /etc/systemd/system/code-bridge.service, enables + starts it
 scripts/restart-safe.sh       # deploy-time restart: waits for running/queued jobs to finish first
-systemctl status claude-code-bridge
-journalctl -u claude-code-bridge -f
+systemctl status code-bridge
+journalctl -u code-bridge -f
 ```
 
 Manual run for development: `node src/index.js` (env overrides: `BRIDGE_PORT`, `BRIDGE_HOST`, `BRIDGE_CONFIG`).
@@ -95,7 +95,15 @@ scripts/mcp-call.sh get_task_log '{"job_id":"j_…","offset":0}'
 
 **Deploying a change: use `scripts/restart-safe.sh`, not a bare `systemctl restart`** — a bare restart kills every running job and marks it `interrupted` (the working tree is left on the job branch for inspection). `restart-safe.sh` waits until nothing is running or queued, then restarts.
 
-The unit has `Restart=always` and `KillMode=control-group`, so Claude child processes die with the server. On every start the bridge loads the job records and marks anything still `queued`/`running` as **`interrupted`** (killing a stray pid if one survived). The project's working tree is left exactly as it was for inspection — which also means the next `start_task` on that project will be refused as dirty until a human sorts it out (or `cancel_task`-style cleanup is done by hand: `git checkout <original-branch>; git branch -D bridge/…`). Leftover temp clone dirs (`~/code/.bridge-tmp`) are removed at start.
+The unit has `Restart=always` and `KillMode=control-group`, so agent child processes die with the server. On every start the bridge loads job records and marks unfinished jobs as **`interrupted`**, cleans up disposable worktrees, and preserves committed branches. Leftover temporary clone directories are removed at startup.
+
+### Upgrade from Claude Code Bridge
+
+Run `scripts/install.sh` from your existing checkout to install `code-bridge.service`. It refuses to interrupt active jobs, disables and stops the old `claude-code-bridge.service`, then starts the new unit. Use `systemctl status code-bridge` and `journalctl -u code-bridge -f` afterwards. The installer resolves its actual checkout path, so renaming the directory is optional.
+
+New installations use `~/.local/share/code-bridge` and `~/.config/code-bridge/token`. If these default paths do not exist but their `claude-code-bridge` equivalents do, the bridge reuses the old paths automatically. Explicit custom paths stay unchanged. This preserves jobs, goals, worktree references, and the existing bearer token; no token rotation or data move is required. Avoid creating an empty new data directory during an upgrade, since an existing new path takes precedence.
+
+The Open WebUI display name is **Code Bridge**. Its established connection ID `claude_code`, tool prefix `claude_code_`, and Beyond toolkit key `claude-code` remain compatibility identifiers: the external pipe uses them for gating, chat context, and job panels. Re-register with the existing ID to update the label. Renaming these IDs requires a coordinated change to the Open WebUI pipe and connection settings. Tool names such as `start_task` and engine values `claude` / `codex` remain unchanged. Jobs expose `CODE_BRIDGE_JOB`; `CLAUDE_CODE_BRIDGE_JOB` remains available for existing hooks. Newly generated tokens use `cb_`; existing tokens remain valid.
 
 ## Model selection
 
@@ -119,9 +127,9 @@ Transparency: `start_task` returns `model`, `tier`, `model_reason`; `get_task_st
 
 ## Codex engine
 
-`start_task` (and each `start_goal` child) takes `engine: "claude" | "codex"`. A Codex job gets everything a Claude job gets — disposable worktree, fresh branch, draft PR, plan/execute, goals and the blackboard, transcripts, cancel, salvage, restart recovery — with `codex exec --json` doing the work instead of `claude -p`. Nothing changes for callers who don't pass it.
+`start_task` (and each `start_goal` child) takes `engine: "claude" | "codex"`. A Codex job gets everything a Claude job gets — disposable worktree, fresh branch, draft PR, plan/execute, goals and the blackboard, transcripts, cancel, salvage, restart recovery — with `codex exec --json` doing the work instead of `claude -p`. Jobs that omit an engine use Codex by default, including goal children.
 
-**Choosing it.** Explicit `engine` > a `model` that only a Codex tier names (`codex`, `terra`, `gpt-6-astra`, or any `gpt-…`/`o…` id) > project `engine` override > `default_engine` (`claude`). Tier *names* are shared, so `model: "complex"` alone never switches engine.
+**Assignment policy.** Prefer Codex for routine work and goal children. Routing precedence is explicit `engine` > engine-specific model ID or alias > named `.claude/agents` agent (Claude) > project `engine` override > `default_engine` (`codex`). Explicit Claude aliases such as `opus`, `fable`, and `haiku`, or raw `claude-…` model IDs, still select Claude. Shared tier names such as `fast`, `default`, and `complex` use the selected engine. Omit engine and model for automatic routing; use Claude for explicit requests, project requirements, named agents, or an intentional second opinion. MCP server instructions and both task/goal schemas expose this policy to the orchestrator.
 
 **Models.** `codex.tiers` mirrors `models.tiers` under the same names, so escalation, `complexity: "low"`, retries and explicit overrides behave identically:
 
@@ -156,7 +164,7 @@ Where a project under `~/code` has a Compose file, the bridge can inspect, resta
 
 **Which file runs.** When the project has exactly one canonical file (`compose.yaml` / `docker-compose.yml`, optionally plus its `.override.` companion), the tools run from the project directory and let Compose pick it up. With more than one Compose file and no `file=` argument the call is **refused and the options listed** — the bridge never guesses which one is production. `file` must be one of the detected files and must resolve inside the project; it's passed as `-f` with the working directory set to that file's folder, exactly as if you ran it there.
 
-**Protected stacks.** `compose.protected` (project directory names *or* Compose project names) are refused for `restart`/`stop`/`up`/`redeploy` with a message pointing at a terminal; `status`/`logs` still work. Default list: `openui` (the Open WebUI stack the chat runs in), `form-submissions` and `dms-v3-form-submissions` (the IMS MCP apps), `claude-code-bridge`. If the bridge itself ever runs inside Docker it detects its own container's Compose project at startup and adds it. To add a stack, append its name; to opt out, remove it (both in `config.json`, then `systemctl restart claude-code-bridge`). The compose project name is also checked after `docker compose config` resolves it, so a protected stack can't be reached through a differently-named directory.
+**Protected stacks.** `compose.protected` (project directory names *or* Compose project names) are refused for `restart`/`stop`/`up`/`redeploy` with a message pointing at a terminal; `status`/`logs` still work. Default list: `openui` (the Open WebUI stack the chat runs in), `form-submissions` and `dms-v3-form-submissions` (the IMS MCP apps), `code-bridge`. If the bridge itself ever runs inside Docker it detects its own container's Compose project at startup and adds it. To add a stack, append its name; to opt out, remove it (both in `config.json`, then `systemctl restart code-bridge`). The compose project name is also checked after `docker compose config` resolves it, so a protected stack can't be reached through a differently-named directory.
 
 **What doesn't exist:** `down`, anything with `-v`/`--volumes`, `rm`, image/system `prune`. Not gated — not implemented (a unit test asserts the verbs are absent). `--remove-orphans` only when `remove_orphans=true` is passed to `compose_redeploy`.
 
@@ -185,7 +193,7 @@ Where a project under `~/code` has a Compose file, the bridge can inspect, resta
 | `claude.bin` / `extra_args` / `branch_prefix` / `commit_author` | How Claude is invoked. |
 | `models.tiers.<tier>` | `{model, max_cost_usd, aliases[]}` per tier; `models.default_tier` / `complex_tier` name which is which. |
 | `models.escalation` | `complex_agents[]`, `prompt_length_chars`, `file_references`, `plan_without_claude_setup`, `retry_after_failure`. |
-| `default_engine` | `claude` or `codex` — the engine when a call doesn't choose. |
+| `default_engine` | `codex` (default) or `claude` — preferred engine when routing has no explicit choice or project requirement. |
 | `codex.bin` / `extra_args` / `api_key` / `execute_sandbox` / `read_claude_md` | How Codex is invoked (see [Codex engine](#codex-engine)). `api_key` belongs in `config.local.json`. |
 | `codex.tiers.<tier>` / `codex.pricing.<model>` | Codex model per tier (same names as `models.tiers`); optional USD-per-million-token prices for cost estimates. |
 | `compose.protected[]` | Stacks the bridge refuses to restart/stop/up/redeploy. `redeploy_timeout_minutes`, `restart_timeout_seconds`, `logs_default_lines`. |

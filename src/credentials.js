@@ -54,7 +54,7 @@ export async function apiFetch(hostCfg, pathname, { method = 'GET', body, search
   const base = hostCfg.api_base || defaultApiBase(hostCfg);
   const url = new URL(base.replace(/\/$/, '') + pathname);
   if (searchParams) for (const [k, v] of Object.entries(searchParams)) url.searchParams.set(k, String(v));
-  const headers = { Accept: 'application/json', 'User-Agent': 'claude-code-bridge' };
+  const headers = { Accept: 'application/json', 'User-Agent': 'code-bridge' };
   if (hostCfg.type === 'github') {
     headers.Authorization = `Bearer ${cred.password}`;
     headers['X-GitHub-Api-Version'] = '2022-11-28';

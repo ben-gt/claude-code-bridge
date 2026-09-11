@@ -1,15 +1,17 @@
 {
   "workspace_root": "~/code",
-  "data_dir": "~/.local/share/claude-code-bridge",
+  "default_engine": "codex",
+  "data_dir": "~/.local/share/code-bridge",
   "server": {
     "host": "0.0.0.0",
     "port": 4010,
-    "token_file": "~/.config/claude-code-bridge/token"
+    "token_file": "~/.config/code-bridge/token"
   },
   "discovery": {
     "depth": 1,
     "exclusions": [
       "node_modules",
+      "code-bridge",
       "claude-code-bridge"
     ]
   },
@@ -38,7 +40,7 @@
     "bin": "claude",
     "extra_args": [],
     "branch_prefix": "bridge/",
-    "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
+    "commit_author": "Code Bridge <code-bridge@localhost>"
   },
   "projects": {
     "form-submissions": {
@@ -90,6 +92,7 @@
       "openui",
       "form-submissions",
       "dms-v3-form-submissions",
+      "code-bridge",
       "claude-code-bridge"
     ],
     "redeploy_timeout_minutes": 15,

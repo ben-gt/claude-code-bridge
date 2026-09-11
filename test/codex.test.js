@@ -125,15 +125,15 @@ test('salvage takes finished agent messages only', () => {
   assert.equal(codexMessageText({ type: 'item.started', item: { type: 'agent_message', text: 'x' } }), null);
 });
 
-test('engine: explicit > Codex model > project override > default', () => {
-  assert.equal(resolveEngine(cfg, {}).engine, 'claude');
+test('engine: explicit > engine-specific model > named agent > project override > Codex default', () => {
+  assert.equal(resolveEngine(cfg, {}).engine, 'codex');
   assert.equal(resolveEngine(cfg, { engine: 'codex' }).engine, 'codex');
   assert.throws(() => resolveEngine(cfg, { engine: 'gemini' }), /engine must be/);
   assert.equal(resolveEngine(cfg, { explicitModel: 'codex' }).engine, 'codex');
   assert.equal(resolveEngine(cfg, { explicitModel: 'gpt-6-astra' }).engine, 'codex');
   assert.equal(resolveEngine(cfg, { explicitModel: 'gpt-5.2' }).engine, 'codex', 'a raw OpenAI id');
   // Tier names are shared, so a bare tier name never switches engine.
-  assert.equal(resolveEngine(cfg, { explicitModel: 'complex' }).engine, 'claude');
+  assert.equal(resolveEngine(cfg, { explicitModel: 'complex' }).engine, 'codex');
   assert.equal(resolveEngine(cfg, { explicitModel: 'opus' }).engine, 'claude');
   assert.equal(resolveEngine(cfg, { engine: 'claude', explicitModel: 'codex' }).engine, 'claude', 'explicit engine wins');
   assert.equal(resolveEngine(cfg, { projectOverrides: { engine: 'codex' } }).engine, 'codex');
@@ -153,4 +153,22 @@ test('codex jobs pick from codex.tiers under the same escalation rules', () => {
   assert.equal(selectModel(cfg, { ...base, mode: 'plan', setup: { claude_md: 'CLAUDE.md' } }).tier, 'default');
   assert.match(selectModel(cfg, { ...base, mode: 'plan', setup: {} }).reason, /no AGENTS\.md or CLAUDE\.md/);
   assert.throws(() => selectModel({ ...cfg, codex: { tiers: {} } }, base), /codex\.tiers/);
+});
+
+test('Codex preference preserves Claude requests, project requirements, and named agents', () => {
+  assert.equal(resolveEngine({}).engine, 'codex', 'fallback without loaded defaults');
+  assert.equal(resolveEngine(cfg, { engine: 'claude' }).engine, 'claude');
+  for (const model of ['opus', 'haiku', 'fable', 'claude-custom']) {
+    assert.equal(resolveEngine(cfg, { explicitModel: model }).engine, 'claude', model);
+  }
+  assert.equal(resolveEngine(cfg, { projectOverrides: { engine: 'claude' } }).engine, 'claude');
+  assert.equal(resolveEngine(cfg, { agent: 'reviewer' }).engine, 'claude');
+  assert.equal(resolveEngine(cfg, { agent: 'reviewer', engine: 'codex' }).engine, 'codex', 'caller wins; job validation rejects incompatible agent');
+  assert.equal(resolveEngine(cfg, { explicitModel: 'opus', projectOverrides: { engine: 'codex' } }).engine, 'claude');
+  assert.equal(resolveEngine(cfg, { explicitModel: 'complex', projectOverrides: { engine: 'claude' } }).engine, 'claude');
+  assert.equal(resolveEngine({ ...cfg, default_engine: 'claude' }).engine, 'claude', 'config remains configurable');
+  for (const [complexity, expected] of [['low', 'gpt-5.6-luna'], ['normal', 'gpt-5.6-terra'], ['high', 'gpt-6-astra']]) {
+    const { engine } = resolveEngine(cfg);
+    assert.equal(selectModel(cfg, { engine, mode: 'execute', complexity }).model, expected);
+  }
 });
