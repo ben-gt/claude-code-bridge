@@ -44,7 +44,9 @@ export function detectClaudeSetup(dir) {
   }
   const hasSettings = fs.existsSync(path.join(dotClaude, 'settings.json')) || fs.existsSync(path.join(dotClaude, 'settings.local.json'));
   const has = !!(claudeMd || preflight || agents.length || hasSettings);
-  return { has_claude_setup: has, claude_md: claudeMd, preflight, agents, has_settings: hasSettings };
+  // Codex's equivalent of CLAUDE.md (exact names; Codex does not case-fold them).
+  const agentsMd = entries.find(e => e === 'AGENTS.override.md' || e === 'AGENTS.md') || null;
+  return { has_claude_setup: has, claude_md: claudeMd, preflight, agents, has_settings: hasSettings, agents_md: agentsMd };
 }
 
 function listCandidateDirs(root, depth, exclusions) {

@@ -1,6 +1,6 @@
 # Claude Code Bridge
 
-An MCP server (Streamable HTTP) that exposes **Claude Code in headless mode** to chat surfaces such as Open WebUI, so engineering tasks can be dispatched against any git repository under `~/code` — and new repos pulled down — without opening a terminal.
+An MCP server (Streamable HTTP) that exposes **Claude Code in headless mode** — and, per job, the **OpenAI Codex CLI** — to chat surfaces such as Open WebUI, so engineering tasks can be dispatched against any git repository under `~/code` — and new repos pulled down — without opening a terminal.
 
 It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, adapts to whatever `.claude` setup a repo has, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and **never merges anything**.
 
@@ -16,7 +16,7 @@ It is general-purpose infrastructure: it knows nothing about any particular proj
 | `list_projects` | Rescan `~/code` and list every git repo: name, current/default branch, remote (creds stripped), dirty flag, `.claude` setup (CLAUDE.md / preflight / agents), agent names, compose file names. Compact by default (~16 KB for 60 repos); `verbose=true` adds paths, agent descriptions and compose metadata. Optional `filter`. |
 | `clone_project` | Clone into `~/code/<name>` using the stored git credentials. Args: `url` **or** `repo` (`owner/repo` + optional `host`), optional `name`, `branch`, `depth`, `full_history`. Shallow by default. Never overwrites — an existing dir returns its path untouched. |
 | `list_available_repos` | Repos visible to the stored credentials on each configured host (GitHub, Gitea, GitLab). Marks ones already cloned. Args: `host`, `query`, `limit`. |
-| `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
+| `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `engine` (`claude` default \| `codex`), `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
 | `get_task_status` | State, elapsed, current activity, branch, PR URL, model, cost, final result / plan text. **Long-polls while a job is active** (`wait_seconds`, default 20, max 50): one call waits for the next state/activity change instead of the caller spinning. Running jobs get a lean payload (~350 bytes); the full record arrives when the job ends. |
 | `get_task_log` | Scrubbed human-readable transcript; `offset` → `next_offset` for incremental polling; `raw=true` for the stream-json events. |
 | `cancel_task` | Kill a queued/running job. Default: discard uncommitted agent work, restore the original branch, delete the job branch. `keep_branch=true` commits partial work and keeps the branch. |
@@ -40,6 +40,8 @@ Job states: `queued → running → completed | failed | cancelled | interrupted
 5. Concurrency: `max_concurrent_jobs` (default 2) global; extra jobs queue. One job per project.
 
 Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents and skills itself — the bridge doesn't strip any of that; it only layers the unattended-run rules on top via `--append-system-prompt`. Projects with no `.claude` setup run plainly.
+
+Codex jobs (`engine: "codex"`) go through the same steps with `codex exec` in place of `claude -p` — see [Codex engine](#codex-engine).
 
 ### Where things live
 
@@ -113,6 +115,39 @@ Escalation triggers (`models.escalation`; crude on purpose, expected to be tuned
 
 Transparency: `start_task` returns `model`, `tier`, `model_reason`; `get_task_status` reports `model` (what the session actually ran, from Claude's init event), `model_selected`, `tier` and `model_reason` (e.g. `escalated: high-complexity agent "system-architect"`). If the session's model differs from the one requested, a note is added. **An unavailable model fails the job** with `model "<id>" (tier <name>) is not available to this Claude Code login — no fallback attempted`; nothing runs on a different tier silently.
 
+## Codex engine
+
+`start_task` (and each `start_goal` child) takes `engine: "claude" | "codex"`. A Codex job gets everything a Claude job gets — disposable worktree, fresh branch, draft PR, plan/execute, goals and the blackboard, transcripts, cancel, salvage, restart recovery — with `codex exec --json` doing the work instead of `claude -p`. Nothing changes for callers who don't pass it.
+
+**Choosing it.** Explicit `engine` > a `model` that only a Codex tier names (`codex`, `terra`, `gpt-6-astra`, or any `gpt-…`/`o…` id) > project `engine` override > `default_engine` (`claude`). Tier *names* are shared, so `model: "complex"` alone never switches engine.
+
+**Models.** `codex.tiers` mirrors `models.tiers` under the same names, so escalation, `complexity: "low"`, retries and explicit overrides behave identically:
+
+| Tier | Codex model (`codex debug models`, codex-cli 0.154.0) | Effort |
+|---|---|---|
+| `fast` | `gpt-5.6-luna` — "fast and affordable" | low |
+| `default` | `gpt-5.6-terra` — "balanced … everyday work" (alias `codex`) | medium |
+| `complex` | `gpt-6-astra` — "most capable … complex, demanding work" | high |
+
+Effort is passed as `-c model_reasoning_effort=…`. Not every model takes every level (`gpt-5.5` and older stop at `xhigh`).
+
+**How it runs.**
+
+- `plan` → `--sandbox read-only` with `approval_policy="never"`. The sandbox is enforced by the OS — checked on this host with `codex sandbox`: writes and commits denied, network blocked. That is stronger than Claude's plan mode, which withholds the edit tools.
+- `execute` → `codex.execute_sandbox`: `danger-full-access` (default; `--dangerously-bypass-approvals-and-sandbox`, the counterpart of Claude's `bypassPermissions` — the agent installs deps, runs tests, commits) or `workspace-write` (writes confined to the worktree, no network, and `.git` stays read-only so the agent cannot commit — the bridge commits its changes with the agent's summary as the message).
+- The unattended-run rules go in as `-c developer_instructions=…`; the prompt goes in on stdin. Codex reads `AGENTS.md`; with `codex.read_claude_md` (default on) it also reads `CLAUDE.md` via `project_doc_fallback_filenames`, so a repo set up only for Claude still gives Codex its instructions (both checked with `codex debug prompt-input`). `.claude/agents` are Claude-only: `agent` with `engine: "codex"` is refused.
+- The final message is the last `agent_message` event, falling back to `--output-last-message`. A killed job's partial work is salvaged from its agent messages, as with Claude.
+
+**Cost — the real difference.** Codex reports tokens, never dollars, and only when the run ends; there is no `--max-budget-usd`. So for a Codex job:
+
+- the **timeout is the only hard bound**;
+- `cost_usd` is an *estimate* from `codex.pricing` (USD per million `input` / `cached_input` / `output` tokens, keyed by model id) — empty by default, because a guessed price is worse than none;
+- with no pricing entry the cost is unknown and the job counts as **$0 against a goal budget**. `start_task` says this in its reply (`cost_note`) before anything runs.
+
+Quota failover (`failover.*`) is Claude-only — its key is an Anthropic key.
+
+**Auth.** `codex exec` does **not** read `OPENAI_API_KEY`. Either log in on the host (`codex login`, or `codex login --device-auth` on a headless box, as root → `~/.codex/auth.json`, found by the service through `HOME=/root`), or put a key in `config.local.json` → `codex.api_key`; it reaches the child as `CODEX_API_KEY` and is registered with the scrubber. An unauthenticated run fails the job with `Codex is not authenticated on this box … Run codex login …` instead of a wall of 401s. The startup log line `codex engine: …` shows the version and auth state.
+
 ## Docker Compose control
 
 Where a project under `~/code` has a Compose file, the bridge can inspect, restart, stop/start and redeploy it. Detection: every file matching `(docker-)?compose*.ya?ml` in the project root and two levels down is listed in `list_projects` → `compose[]` (`file`, `dir`, `canonical`, `override`).
@@ -148,8 +183,11 @@ Where a project under `~/code` has a Compose file, the bridge can inspect, resta
 | `claude.bin` / `extra_args` / `branch_prefix` / `commit_author` | How Claude is invoked. |
 | `models.tiers.<tier>` | `{model, max_cost_usd, aliases[]}` per tier; `models.default_tier` / `complex_tier` name which is which. |
 | `models.escalation` | `complex_agents[]`, `prompt_length_chars`, `file_references`, `plan_without_claude_setup`, `retry_after_failure`. |
+| `default_engine` | `claude` or `codex` — the engine when a call doesn't choose. |
+| `codex.bin` / `extra_args` / `api_key` / `execute_sandbox` / `read_claude_md` | How Codex is invoked (see [Codex engine](#codex-engine)). `api_key` belongs in `config.local.json`. |
+| `codex.tiers.<tier>` / `codex.pricing.<model>` | Codex model per tier (same names as `models.tiers`); optional USD-per-million-token prices for cost estimates. |
 | `compose.protected[]` | Stacks the bridge refuses to restart/stop/up/redeploy. `redeploy_timeout_minutes`, `restart_timeout_seconds`, `logs_default_lines`. |
-| `projects.<name>` | Per-project overrides: `default_branch`, `job_timeout_minutes`, `max_cost_usd`, `allow_untracked`, `tier`. |
+| `projects.<name>` | Per-project overrides: `default_branch`, `job_timeout_minutes`, `max_cost_usd`, `allow_untracked`, `tier`, `engine`. |
 
 Example override (from `config.json`):
 
@@ -164,6 +202,7 @@ Example override (from `config.json`):
 - **Git hosts**: the bridge never stores or reads git credentials itself. Clones, fetches and pushes go through git, which uses whatever credential helper / SSH key the machine already has (here: `credential.helper=store` → `~/.git-credentials`, 0600, for github.com and git.gnrl.tech; SSH keys for `git@…` remotes). For API calls (`list_available_repos`, draft PRs) it asks `git credential fill` for the host, keeps the secret in memory only, and registers it with the scrubber so it can never appear in a response or log. Child processes get a minimal environment (`PATH, HOME, USER, LANG, TERM, SHELL, IS_SANDBOX, GIT_TERMINAL_PROMPT`) — no tokens.
 - **Rotation** (no redeploy): update the stored credential where git keeps it (`git credential reject` + `git credential approve`, or edit the helper's store), then the next API/clone call picks it up (API credentials are cached for at most 5 minutes). Prefer a fine-grained PAT scoped to the repos you want the bridge to see; GitHub's `/user/repos` only returns what the token can access. (At build time the stored github.com credential was a classic PAT with `repo, workflow, read:user, user:email` — it works, but swapping it for a fine-grained token limited to the repos the bridge should touch is the recommended follow-up; nothing in the bridge needs changing for that.)
 - **Claude**: uses the host's Claude Code login (`~/.claude`). `claude auth login` / `claude setup-token` as root to change it.
+- **Codex**: the host's `codex login` (`~/.codex/auth.json`), or `codex.api_key` in `config.local.json` (sent as `CODEX_API_KEY`; `codex exec` ignores `OPENAI_API_KEY`).
 - **Bridge bearer token**: `scripts/token.sh` prints it; `scripts/rotate-token.sh` generates a new one, restarts the service; then re-run `scripts/register-openwebui.sh` so Open WebUI has the new value.
 
 ### Secret scrubbing
@@ -194,6 +233,8 @@ Built and tested against **Claude Code 2.1.240** (`claude --version`), Node 22.1
 
 If Claude Code changes the stream-json shape, the parser is `JobManager.handleEvent` in `src/jobs.js`; the argument builder is `claudeArgs`/`systemPrompt` right above it.
 
+**Codex:** built against **codex-cli 0.154.0**. Relied on: `codex exec --json` (events `thread.started`, `turn.started`, `item.started|updated|completed` with item types `agent_message`, `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search`, `todo_list`, `error`; `turn.completed {usage}`; `turn.failed`; top-level `error` for non-fatal reconnects), `--model`, `--sandbox`, `--dangerously-bypass-approvals-and-sandbox`, `--output-last-message`, `-` (prompt on stdin), and `-c` for `approval_policy`, `model_reasoning_effort`, `developer_instructions`, `project_doc_fallback_filenames`. The parser is `applyCodexEvent` in `src/codex.js`; the argument builder is `codexArgs` beside it.
+
 ## Layout
 
 ```
@@ -203,7 +244,8 @@ src/jobs.js         queue, Claude spawn, stream parsing, branch/push/PR, cancel,
 src/projects.js     discovery + .claude setup / agent detection
 src/clone.js        clone_project, list_available_repos
 src/compose.js      compose file detection, target resolution, protected list, compose ops
-src/models.js       model tier selection + escalation triggers
+src/models.js       engine + model tier selection, escalation triggers
+src/codex.js        Codex engine: exec args, env, JSONL event parser, cost estimate
 src/credentials.js  git credential fill + host API calls (GitHub / Gitea / GitLab)
 src/git.js          git helpers with timeouts and a credential-safe env
 src/paths.js        workspace boundary + name sanitising

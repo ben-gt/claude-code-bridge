@@ -12,6 +12,32 @@ export function countFileReferences(prompt) {
 }
 
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const ENGINES = ['claude', 'codex'];
+
+/**
+ * Which CLI runs the job: explicit engine > a model that only a Codex tier
+ * names (or that is plainly an OpenAI id) > project override > default_engine.
+ * Tier NAMES are shared by both engines, so `model: "complex"` alone never
+ * switches engine — only a model id or alias can.
+ */
+export function resolveEngine(cfg, { engine = null, explicitModel = null, projectOverrides = {} } = {}) {
+  // Checked wherever it comes from: a typo in config would otherwise run Claude
+  // while every record claimed a different engine.
+  const valid = (e, where) => {
+    if (!ENGINES.includes(e)) throw new Error(`${where} must be one of ${ENGINES.join(', ')} (got ${e})`);
+    return e;
+  };
+  if (engine) return { engine: valid(engine, 'engine'), reason: 'explicit engine argument' };
+  if (explicitModel) {
+    const m = String(explicitModel).trim();
+    const names = tiers => Object.values(tiers || {}).some(t => t.model === m || (t.aliases || []).includes(m));
+    const claude = names(cfg.models?.tiers) || !!cfg.models?.tiers?.[m];
+    if (!claude && names(cfg.codex?.tiers)) return { engine: 'codex', reason: `model "${m}" is a Codex tier` };
+    if (!claude && /^(gpt-|o\d)/i.test(m)) return { engine: 'codex', reason: `model "${m}" is an OpenAI model` };
+  }
+  if (projectOverrides.engine) return { engine: valid(projectOverrides.engine, 'projects.<name>.engine'), reason: 'project engine override' };
+  return { engine: valid(cfg.default_engine || 'claude', 'default_engine'), reason: 'default engine' };
+}
 
 /**
  * @returns {{ tier: string, model: string, max_cost_usd: number, effort: string|null,
@@ -19,15 +45,20 @@ export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
  */
 export function selectModel(cfg, {
   projectOverrides = {}, prompt = '', mode = 'plan', agent = null, setup = null,
-  explicitModel = null, complexity = null, priorFailure = null, explicitEffort = null,
+  explicitModel = null, complexity = null, priorFailure = null, explicitEffort = null, engine = 'claude',
 } = {}) {
-  const tiers = cfg.models?.tiers || {};
+  // Each engine has its own tier table under the same tier names, so every rule
+  // below — escalation, de-escalation, explicit overrides — applies to Codex
+  // unchanged; only the model ids differ.
+  const codex = engine === 'codex';
+  const tiers = (codex ? cfg.codex?.tiers : cfg.models?.tiers) || {};
+  const where = codex ? 'codex.tiers' : 'models.tiers';
   const defaultTier = cfg.models?.default_tier || 'default';
   const complexTier = cfg.models?.complex_tier || 'complex';
   const esc = cfg.models?.escalation || {};
   const tierFor = name => {
     const t = tiers[name];
-    if (!t || !t.model) throw new Error(`model tier "${name}" is not configured (models.tiers in config.json)`);
+    if (!t || !t.model) throw new Error(`model tier "${name}" is not configured (${where} in config.json)`);
     return { tier: name, model: t.model, max_cost_usd: t.max_cost_usd ?? cfg.limits?.max_cost_usd ?? 5 };
   };
   // Effort is resolved independently of the tier so an explicit argument can
@@ -39,7 +70,7 @@ export function selectModel(cfg, {
     const t = tiers[tierName];
     if (t && t.effort) return { effort: t.effort, effort_reason: `tier "${tierName}" default${why ? ` (${why})` : ''}` };
     const d = cfg.models?.default_effort;
-    return d ? { effort: d, effort_reason: 'models.default_effort' } : { effort: null, effort_reason: 'unset (Claude Code default)' };
+    return d ? { effort: d, effort_reason: 'models.default_effort' } : { effort: null, effort_reason: `unset (${codex ? 'Codex' : 'Claude Code'} default)` };
   };
 
   // 1. Explicit always wins — tier name, configured model id, alias, or any raw model string.
@@ -76,7 +107,9 @@ export function selectModel(cfg, {
   if (esc.prompt_length_chars && len > esc.prompt_length_chars) triggers.push(`prompt length ${len} > ${esc.prompt_length_chars} chars`);
   const refs = countFileReferences(prompt);
   if (esc.file_references && refs > esc.file_references) triggers.push(`prompt references ${refs} files (> ${esc.file_references})`);
-  if (esc.plan_without_claude_setup !== false && mode === 'plan' && setup && !setup.has_claude_setup) triggers.push('plan mode on a project with no .claude setup');
+  // Codex reads AGENTS.md, and CLAUDE.md through the fallback the bridge sets.
+  const hasSetup = setup && (codex ? !!(setup.agents_md || setup.claude_md) : setup.has_claude_setup);
+  if (esc.plan_without_claude_setup !== false && mode === 'plan' && setup && !hasSetup) triggers.push(`plan mode on a project with no ${codex ? 'AGENTS.md or CLAUDE.md' : '.claude setup'}`);
   // A quota failure is not a capability failure — see findPriorFailure. Retry
   // on the tier the job would have had, not a more expensive one.
   if (esc.retry_after_failure !== false && priorFailure && !priorFailure.quota) {

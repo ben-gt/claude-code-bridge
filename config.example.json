@@ -52,6 +52,21 @@
     "subagent_model": "claude-haiku-4-5",
     "disable_nonessential_traffic": true
   },
+  "default_engine": "claude",
+  "codex": {
+    "_comment": "OpenAI Codex CLI as a second engine (start_task engine: \"codex\"). api_key: empty = use the host's `codex login` (~/.codex/auth.json); a key here is passed as CODEX_API_KEY (codex exec ignores OPENAI_API_KEY) and belongs in config.local.json. execute_sandbox: danger-full-access (like Claude's bypassPermissions: installs deps, runs tests, commits) or workspace-write (worktree-only writes, no network, .git read-only so the bridge commits for the agent); plan jobs are always read-only. tiers use the same names as models.tiers. pricing: USD per million tokens per model id - Codex reports tokens, never cost, so without an entry a job's cost is unknown and counts as $0 against a goal budget.",
+    "bin": "codex",
+    "extra_args": [],
+    "api_key": "",
+    "execute_sandbox": "danger-full-access",
+    "read_claude_md": true,
+    "tiers": {
+      "fast": { "model": "gpt-5.6-luna", "max_cost_usd": 2, "aliases": ["luna"], "effort": "low" },
+      "default": { "model": "gpt-5.6-terra", "max_cost_usd": 5, "aliases": ["codex", "terra"], "effort": "medium" },
+      "complex": { "model": "gpt-6-astra", "max_cost_usd": 12, "aliases": ["astra"], "effort": "high" }
+    },
+    "pricing": {}
+  },
   "models": {
     "_comment": "Tier names are policy; model ids must be ones the installed Claude Code accepts (confirmed for 2.1.251: claude-opus-5, claude-fable-5, claude-haiku-4-5). An unavailable model fails the job loudly - no fallback. Each tier may name an effort level (low|medium|high|xhigh|max); Claude Code's own default is high, and on routine work thinking tokens dominate wall-clock time, so high everywhere is the slow default. Escalation triggers are crude on purpose and expected to be tuned; complexity \"low\" de-escalates to fast_tier.",
     "default_tier": "default",

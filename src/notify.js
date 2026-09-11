@@ -130,6 +130,7 @@ export class Notifier {
     // text that buried the one fact worth seeing — which project just moved.
     const bits = [
       job.mode,
+      job.kind === 'codex' ? 'codex' : null,
       shortModel(job.model_selected),
       job.effort_selected,
       job.goal_label ? `goal: ${job.goal_label}` : null,

@@ -60,6 +60,43 @@ export const DEFAULTS = {
     // no human is reading them. Sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
     disable_nonessential_traffic: true,
   },
+  // Which CLI runs a job when the caller does not say: 'claude' or 'codex'.
+  default_engine: 'claude',
+  // OpenAI Codex CLI as a second engine (start_task engine: "codex"). Same
+  // worktrees, branches, draft PRs, goals and transcripts as a Claude job; only
+  // the process underneath differs. See src/codex.js for what was verified.
+  codex: {
+    bin: 'codex',
+    // Appended verbatim before the prompt. Do not put --model or effort here.
+    extra_args: [],
+    // Empty: the host's `codex login` (~/.codex/auth.json) is used. A key here
+    // is passed as CODEX_API_KEY — `codex exec` ignores OPENAI_API_KEY. It is
+    // a secret: config.local.json, never config.json.
+    api_key: '',
+    // Plan jobs always run in Codex's read-only sandbox. Execute jobs:
+    //  'danger-full-access' — no sandbox, like the Claude path's
+    //     bypassPermissions: the agent can install deps, run tests and commit.
+    //  'workspace-write' — writes confined to the worktree, no network, and .git
+    //     is read-only so the agent cannot commit; the bridge commits for it.
+    execute_sandbox: 'danger-full-access',
+    // Codex reads AGENTS.md; this lets it read CLAUDE.md too, so repos set up
+    // for Claude only still give Codex their instructions.
+    read_claude_md: true,
+    // Same tier names as models.tiers, so escalation works identically. Ids
+    // from `codex debug models` on codex-cli 0.154.0 (2026-09-11). The ceilings
+    // only mean anything with a pricing entry — see below.
+    tiers: {
+      fast: { model: 'gpt-5.6-luna', max_cost_usd: 2, aliases: ['luna'], effort: 'low' },
+      default: { model: 'gpt-5.6-terra', max_cost_usd: 5, aliases: ['codex', 'terra'], effort: 'medium' },
+      complex: { model: 'gpt-6-astra', max_cost_usd: 12, aliases: ['astra'], effort: 'high' },
+    },
+    // USD per million tokens keyed by model id:
+    //   { "gpt-5.6-terra": { "input": 0, "cached_input": 0, "output": 0 } }
+    // Codex reports tokens, never cost. With no entry a Codex job's cost is
+    // unknown, its ceiling cannot be checked, and it counts as $0 against a goal
+    // budget. Deliberately empty rather than guessed.
+    pricing: {},
+  },
   // Model tiers. Names are policy; ids were confirmed against Claude Code 2.1.251
   // and the live Models API on 2026-09-02. Change here, not in code.
   //

@@ -15,6 +15,7 @@ import { registerTools } from './tools.js';
 import { addSecret, scrub } from './scrub.js';
 import { cleanCloneTemp } from './clone.js';
 import { detectSelfComposeProject, dockerAvailable, protectedList } from './compose.js';
+import { describeCodex } from './codex.js';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
 
@@ -51,6 +52,7 @@ async function main() {
   fs.mkdirSync(cfg.data_dir, { recursive: true });
   const token = loadOrCreateToken(cfg.server.token_file);
   addSecret(token);
+  if (cfg.codex?.api_key) addSecret(cfg.codex.api_key);
 
   const projects = new ProjectIndex(cfg);
   const notify = new Notifier(cfg, { log });
@@ -64,6 +66,7 @@ async function main() {
   const composeVer = await dockerAvailable();
   log.info(`docker compose: ${composeVer ? `v${composeVer}` : 'NOT AVAILABLE (compose tools will fail)'}; protected stacks: ${protectedList(cfg).join(', ')}${self ? ` (self: ${self})` : ''}`);
   log.info(`model tiers: ${Object.entries(cfg.models?.tiers || {}).map(([k, v]) => `${k}=${v.model} ($${v.max_cost_usd})`).join(', ')}`);
+  describeCodex(cfg).then(s => log.info(`codex engine: ${s}`)).catch(e => log.warn(`codex engine: status check failed (${e.message})`));
   projects.scan().then(p => log.info(`discovered ${p.length} project(s) under ${cfg.workspace_root}`)).catch(e => log.error(`initial scan failed: ${e.message}`));
 
   const app = express();
@@ -92,6 +95,7 @@ async function main() {
       'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Nothing is ever merged automatically.',
       'Jobs run in disposable git worktrees: a dirty checkout never blocks a job and jobs never touch the checkout. Deploying a stack that builds from its checkout: merge the PR, update_checkout, compose_redeploy (projects carry a note in list_projects when this applies).',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
+      'Engines: jobs run on Claude Code by default. Pass engine "codex" to start_task (or a Codex model such as "codex") to run the same job on the OpenAI Codex CLI; Codex jobs report tokens, not dollars.',
     ].join('\n') });
     registerTools(server, { cfg, projects, jobs, goals, notify, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

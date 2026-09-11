@@ -45,7 +45,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
       // Compact by default: this result lands in the chat context verbatim and is often called more than once.
       out = out.map(p => ({
         name: p.name, note: p.note || undefined, current_branch: p.current_branch, default_branch: p.default_branch, remote: p.remote, dirty: p.dirty,
-        has_claude_setup: p.has_claude_setup, claude_md: p.claude_md || undefined, preflight: p.preflight || undefined,
+        has_claude_setup: p.has_claude_setup, claude_md: p.claude_md || undefined, agents_md: p.agents_md || undefined, preflight: p.preflight || undefined,
         agents: p.agents.length ? p.agents.map(a => a.name) : undefined,
         compose: p.compose.length ? p.compose.map(c => c.file) : undefined,
         overrides: p.overrides,
@@ -85,16 +85,17 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
 
   server.registerTool('start_task', {
     title: 'Start a Claude Code task',
-    description: `Dispatch a natural-language task to Claude Code (headless) in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Every job runs in a disposable git worktree: the project checkout is never touched, a dirty checkout does not block anything (its uncommitted changes are simply invisible to the job), and multiple jobs may run on one project. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}).`,
+    description: `Dispatch a natural-language task to Claude Code (headless) — or to the OpenAI Codex CLI with engine "codex" — in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Every job runs in a disposable git worktree: the project checkout is never touched, a dirty checkout does not block anything (its uncommitted changes are simply invisible to the job), and multiple jobs may run on one project. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}). Codex reports tokens rather than dollars, so for a Codex job only the timeout is a hard bound — the reply says so in cost_note.`,
     inputSchema: {
       project: z.string().describe('Project name as shown by list_projects'),
       prompt: z.string().describe('What to do, in natural language'),
       mode: z.enum(['plan', 'execute']).optional().describe('plan (default, read-only) or execute'),
-      agent: z.string().optional().describe('Name of a project agent from .claude/agents to run as'),
+      agent: z.string().optional().describe('Name of a project agent from .claude/agents to run as (Claude engine only)'),
+      engine: z.enum(['claude', 'codex']).optional().describe(`Which CLI runs the job: "claude" (Claude Code) or "codex" (OpenAI Codex CLI). Default "${cfg.default_engine || 'claude'}". Same worktree, branch, draft PR and plan/execute rules either way. Only set it when the user asks for Codex or for a second opinion from a different model family.`),
       base_branch: z.string().optional().describe('Branch to start from (defaults to the project default branch)'),
       max_cost_usd: z.number().positive().optional().describe('Override the cost ceiling for this job (default is per model tier)'),
       timeout_minutes: z.number().positive().max(180).optional().describe('Override the hard timeout for this job'),
-      model: z.string().optional().describe(`Override model selection: a tier name (${Object.keys(cfg.models?.tiers || {}).join(', ')}), a configured model id/alias, or any model string. Omit to let the bridge choose (default tier unless an escalation trigger fires). Always honoured, up or down.`),
+      model: z.string().optional().describe(`Override model selection: a tier name (${Object.keys(cfg.models?.tiers || {}).join(', ')}), a configured model id/alias, or any model string. Omit to let the bridge choose (default tier unless an escalation trigger fires). Always honoured, up or down. With engine "codex" the same tier names map to Codex models (${Object.values(cfg.codex?.tiers || {}).map(t => t.model).join(', ')}); a Codex model id or alias such as "codex" selects the Codex engine by itself.`),
       complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier (slower, more capable). "low" DE-escalates to the fast tier and low effort — use it for lookups, renames, status checks and other grep-shaped work, where it is markedly faster and cheaper.'),
       effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Reasoning effort for this job. Defaults come from the chosen tier. Effort drives adaptive reasoning and is usually the biggest lever on how long a job takes — lower it for scoped, well-specified tasks; raise it for genuinely hard ones.'),
       retry_of: z.string().optional().describe('job_id of a previous failed attempt; retries escalate automatically'),
@@ -107,7 +108,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
     const clash = r.concurrent_on_project
       ? ` ⚠ ${r.project} already has ${r.concurrent_on_project.count} other job(s) in flight — they cannot see each other's findings, and both are billed. Mention this to the user.`
       : '';
-    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.effort ? `; effort ${r.effort} — ${r.effort_reason}` : ''}).${clash} Poll get_task_status with this job_id.`);
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, ${r.engine === 'codex' ? 'codex ' : ''}model ${r.model} — ${r.model_reason}${r.effort ? `; effort ${r.effort} — ${r.effort_reason}` : ''}).${r.cost_note ? ` ${r.cost_note}` : ''}${clash} Poll get_task_status with this job_id.`);
   }, 'start_task'));
 
   server.registerTool('start_goal', {
@@ -119,6 +120,7 @@ export function registerTools(server, { cfg, projects, jobs, goals, notify, log 
         project: z.string().describe('Project name as shown by list_projects'),
         prompt: z.string().describe("This child's slice of the objective"),
         mode: z.enum(['plan', 'execute']).optional(),
+        engine: z.enum(['claude', 'codex']).optional(),
         model: z.string().optional(),
         complexity: z.enum(['low', 'normal', 'high']).optional(),
         effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),

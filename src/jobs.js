@@ -10,7 +10,8 @@ import { detectClaudeSetup } from './projects.js';
 import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
-import { selectModel, EFFORT_LEVELS } from './models.js';
+import { selectModel, resolveEngine, EFFORT_LEVELS } from './models.js';
+import { codexArgs, codexEnv, codexSandbox, applyCodexEvent, codexMessageText } from './codex.js';
 import { resolveComposeTarget, composeConfig, composeStatus, composeStream, validateServices, killGroup as composeKill, isProtected } from './compose.js';
 
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
@@ -205,6 +206,7 @@ export class JobManager {
       commits: j.commits ?? undefined, pushed: j.pushed ?? undefined, pr_url: j.pr_url || undefined,
       session_id: j.session_id || undefined,
       model: j.model || j.model_selected || undefined, model_selected: j.model_selected || undefined, tier: j.tier || undefined, model_reason: j.model_reason || undefined,
+      engine_reason: j.engine_reason || undefined, sandbox: j.sandbox || undefined,
       effort: j.effort_selected || undefined, effort_reason: j.effort_reason || undefined,
       compose: j.compose || undefined,
       cost_usd: j.cost_usd ?? undefined, usage: j.usage || undefined, num_turns: j.num_turns ?? undefined,
@@ -301,6 +303,9 @@ export class JobManager {
     const quotaFailure = err => /session limit|usage limit|rate limit|quota|(more|out of) credits|429/i.test(String(err || ''));
     const describe = j => (
       quotaFailure(j.error) ? { why: 'hit an account limit rather than failing the task', quota: true }
+        // Likewise a Codex login that was never there: nothing was attempted,
+        // so a bigger model fixes nothing — it is usually the first run.
+        : /not authenticated/i.test(String(j.error || '')) ? { why: 'could not authenticate rather than failing the task', quota: true }
         : /cost ceiling/i.test(String(j.error || '')) ? { why: 'hit its cost ceiling', quota: false }
         : { why: `ended ${j.state}`, quota: false }
     );
@@ -310,7 +315,7 @@ export class JobManager {
       return { id: j.id, ...describe(j) };
     }
     const prev = [...this.jobs.values()]
-      .filter(j => (j.kind || 'claude') === 'claude' && j.project === project && ['failed', 'interrupted'].includes(j.state) && norm(j.prompt) === norm(prompt))
+      .filter(j => j.kind !== 'compose_redeploy' && j.project === project && ['failed', 'interrupted'].includes(j.state) && norm(j.prompt) === norm(prompt))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
     if (!prev) return null;
     // Only the most recent attempt matters; if it later succeeded, no escalation.
@@ -320,13 +325,16 @@ export class JobManager {
   }
 
   // ---------- start ----------
-  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, retry_of, goal_id, depends_on, chat_id }) {
+  async start({ project, prompt, agent, base_branch, mode = 'plan', max_cost_usd, timeout_minutes, model, complexity, effort, engine, retry_of, goal_id, depends_on, chat_id }) {
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) throw new Error('prompt is required');
     if (!['plan', 'execute'].includes(mode)) throw new Error(`mode must be "plan" or "execute" (got ${mode})`);
     const dir = resolveProjectDir(this.cfg, project);
     const name = path.relative(fs.realpathSync(this.cfg.workspace_root), dir);
     const ov = projectOverrides(this.cfg, name);
     const setup = detectClaudeSetup(dir);
+    const eng = resolveEngine(this.cfg, { engine, explicitModel: model, projectOverrides: ov });
+    const codex = eng.engine === 'codex';
+    if (agent && codex) throw new Error(`agent "${agent}" is a Claude Code subagent (.claude/agents) and cannot run under engine "codex" — drop agent, or use engine "claude"`);
     if (agent && !setup.agents.some(a => a.name === agent)) {
       throw new Error(`agent "${agent}" not found in ${name}/.claude/agents (available: ${setup.agents.map(a => a.name).join(', ') || 'none'})`);
     }
@@ -347,7 +355,8 @@ export class JobManager {
       if (!gate.ok) throw new Error(`cannot dispatch into goal ${goal_id}: ${gate.why}`);
     }
     const priorFailure = this.findPriorFailure(name, prompt, retry_of);
-    const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure, explicitEffort: effort });
+    const choice = selectModel(this.cfg, { projectOverrides: ov, prompt, mode, agent, setup, explicitModel: model, complexity, priorFailure, explicitEffort: effort, engine: eng.engine });
+    const sandbox = codex ? codexSandbox(this.cfg, mode) : null;
 
     // Jobs run in a disposable worktree created from committed state, so a
     // dirty checkout never blocks a job — but uncommitted work is invisible
@@ -367,10 +376,17 @@ export class JobManager {
       // Ceiling precedence: explicit arg > project override > tier ceiling > global.
       max_cost_usd: max_cost_usd ?? ov.max_cost_usd ?? choice.max_cost_usd ?? this.cfg.limits.max_cost_usd,
     };
+    // Said at dispatch rather than discovered on the bill: a Codex run cannot be
+    // stopped at a dollar figure, and without pricing its cost is not known at all.
+    const costNote = !codex ? null
+      : this.cfg.codex?.pricing?.[choice.model]
+        ? `Codex cannot be stopped at a cost ceiling mid-run; its cost is estimated from tokens when it finishes, and only the ${limits.timeout_minutes}-minute timeout is a hard bound.`
+        : `Codex reports tokens, not cost, and codex.pricing has no entry for ${choice.model}: this job's cost is unknown, its $${limits.max_cost_usd} ceiling cannot be checked, and it counts as $0 against a goal budget. Only the ${limits.timeout_minutes}-minute timeout bounds it.`;
     const id = newJobId();
     const job = {
-      id, kind: 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
+      id, kind: codex ? 'codex' : 'claude', project: name, project_path: dir, mode, agent: agent || null, prompt: scrub(prompt), summary: trunc(prompt.replace(/\s+/g, ' ').trim(), 100),
       model_selected: choice.model, tier: choice.tier, model_reason: choice.reason,
+      engine_reason: eng.reason, sandbox,
       effort_selected: choice.effort || null, effort_reason: choice.effort_reason || null,
       goal_id: goal_id || null, depends_on: depends_on?.length ? [...depends_on] : null,
       // Where this was asked for. Carried only so the channel feed can link
@@ -381,12 +397,12 @@ export class JobManager {
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
-      error: null, notes: dirtyNote ? [dirtyNote] : [], pid: null, limits, setup: { claude_md: setup.claude_md, preflight: setup.preflight, agents: setup.agents.map(a => a.name) },
+      error: null, notes: [dirtyNote, costNote].filter(Boolean), pid: null, limits, setup: { claude_md: setup.claude_md, agents_md: setup.agents_md, preflight: setup.preflight, agents: setup.agents.map(a => a.name) },
     };
     fs.mkdirSync(this.jobDir(id), { recursive: true });
     this.jobs.set(id, job);
     this.save(job, { immediate: true });
-    this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode}${agent ? ` agent=${agent}` : ''} model=${choice.model} tier=${choice.tier} (${choice.reason})`);
+    this.appendTranscript(job, `job ${id} queued: project=${name} mode=${mode} engine=${eng.engine}${agent ? ` agent=${agent}` : ''} model=${choice.model} tier=${choice.tier} (${choice.reason})`);
     if (goal_id) this.goals.attach(goal_id, id);
     setImmediate(() => this.pump());
     if (clash.length) {
@@ -395,6 +411,7 @@ export class JobManager {
       this.notify?.post(`\u26a0 **${name}** now has ${clash.length + 1} jobs in flight \u2014 they cannot see each other's findings`);
     }
     return { job_id: id, goal_id: goal_id || undefined, state: job.state, project: name, mode, model: choice.model,
+      engine: eng.engine, engine_reason: eng.reason, sandbox: sandbox || undefined, cost_note: costNote || undefined,
       concurrent_on_project: clash.length
         ? { count: clash.length, jobs: clash.map(j => ({ job_id: j.id, state: j.state, summary: j.summary })),
             note: `${name} already has ${clash.length} job(s) in flight. They run in separate worktrees so they cannot corrupt each other, but they cannot see each other's findings either, and you are paying for both. Tell the user before continuing if this was not deliberate.` }
@@ -452,6 +469,8 @@ export class JobManager {
         if (!line.trim()) continue;
         let ev;
         try { ev = JSON.parse(line); } catch { continue; }
+        const codexText = codexMessageText(ev);
+        if (codexText) { parts.push(codexText); continue; }
         if (ev.type !== 'assistant') continue;
         for (const b of (ev.message?.content || [])) {
           // Visible text only. Thinking blocks are the model's working, not a
@@ -498,7 +517,8 @@ export class JobManager {
     const fo = this.cfg.failover || {};
     if (
       state === 'failed' && fo.enabled && fo.api_key && !job.failover_used &&
-      job.kind !== 'compose_redeploy' && JobManager.isQuotaError(error)
+      // Claude jobs only: the key is an Anthropic key and means nothing to Codex.
+      (job.kind || 'claude') === 'claude' && JobManager.isQuotaError(error)
     ) {
       job.failover_used = true;
       job.state = 'queued';
@@ -639,22 +659,30 @@ export class JobManager {
       this.appendTranscript(job, `created read-only worktree at ${ref}`);
     }
 
-    // Build the claude command.
-    const args = this.claudeArgs(job, { remote });
-    job.activity = 'launching claude';
+    // Build the command for the job's engine.
+    const codex = job.kind === 'codex';
+    const engine = codex ? 'codex' : 'claude';
+    const lastMessageFile = path.join(this.jobDir(job.id), 'last_message.md');
+    const args = codex
+      ? codexArgs(job, this.cfg, { instructions: this.systemPrompt(job, { remote }), lastMessageFile })
+      : this.claudeArgs(job, { remote });
+    job.activity = `launching ${engine}`;
     this.save(job, { immediate: true });
-    this.appendTranscript(job, `exec: claude ${args.filter(a => a !== job.prompt).map(a => a.length > 80 ? trunc(a, 80) : a).join(' ')}`);
+    this.appendTranscript(job, `exec: ${engine} ${args.filter(a => a !== job.prompt).map(a => a.length > 80 ? trunc(a, 80) : a).join(' ')}`);
 
-    const exit = await this.spawnClaude(job, args);
+    // Codex reads its prompt from stdin (see codexArgs).
+    const exit = await this.spawnAgent(job, args, codex ? { input: job.prompt } : {});
     if (job.state === 'cancelled' || job._cancelling) return; // cancel() handles cleanup
+    if (codex) this.finishCodexResult(job, lastMessageFile);
 
     if (exit.timedOut) {
       await this.postProcess(job, { remote, abnormal: true });
       return this.finish(job, 'failed', `timed out after ${job.limits.timeout_minutes} minutes (hard limit); partial work kept on ${job.branch || 'no branch'}`);
     }
-    if (exit.code !== 0 && !job._resultSeen) {
+    // A Codex turn.failed has already said why; prefer that to the exit code.
+    if (exit.code !== 0 && !job._resultSeen && !job._resultError) {
       await this.postProcess(job, { remote, abnormal: true });
-      return this.finish(job, 'failed', `claude exited with code ${exit.code}${exit.lastStderr ? `: ${trunc(exit.lastStderr, 400)}` : ''}`);
+      return this.finish(job, 'failed', `${engine} exited with code ${exit.code}${exit.lastStderr ? `: ${trunc(exit.lastStderr, 400)}` : ''}`);
     }
     if (job._modelUnrecognized && !job._resultError) job._resultError = `model "${job.model_selected}" (tier ${job.tier}) is not available to this Claude Code login — no fallback attempted`;
     if (job._resultError) {
@@ -693,8 +721,9 @@ export class JobManager {
       // model cannot see coming: 20 jobs ran straight into it and died with
       // nothing to show, $169.71 spent for zero deliverable, every one of them
       // an execute-mode job on the expensive tier. Telling the agent the number
-      // converts "cut off mid-thought" into "wrapped up in time".
-      `You have a hard budget of $${Number(job.limits.max_cost_usd).toFixed(2)} for this job and a hard limit of ${job.limits.timeout_minutes} minutes. Both are enforced by killing the run — there is no grace period and no partial credit, so a job that spends everything investigating delivers nothing at all. Pace yourself against that: prefer landing a smaller, correct, well-explained result over an exhaustive one you do not finish. If you find yourself running long, stop exploring and write up what you have established, what you changed, and what remains — an honest partial answer is worth far more than being cut off mid-sentence.`,
+      // converts "cut off mid-thought" into "wrapped up in time". Codex has no
+      // budget flag, so a Codex job is told only the limit that actually applies.
+      `You have ${job.kind === 'codex' ? `a hard limit of ${job.limits.timeout_minutes} minutes for this job. It is` : `a hard budget of $${Number(job.limits.max_cost_usd).toFixed(2)} for this job and a hard limit of ${job.limits.timeout_minutes} minutes. Both are`} enforced by killing the run — there is no grace period and no partial credit, so a job that spends everything investigating delivers nothing at all. Pace yourself against that: prefer landing a smaller, correct, well-explained result over an exhaustive one you do not finish. If you find yourself running long, stop exploring and write up what you have established, what you changed, and what remains — an honest partial answer is worth far more than being cut off mid-sentence.`,
     ];
     if (job.goal_id && this.goals) {
       const g = this.goals.goals.get(job.goal_id);
@@ -720,12 +749,16 @@ export class JobManager {
         // fails; 33 plan jobs burned turns discovering that independently, and
         // several spent the discovery a second time after reading that an
         // earlier agent had already hit it.
-        `The Edit, Write and NotebookEdit tools are NOT available to you in this job — not restricted, absent. Do not attempt to create, write or save ANY file, including a plan document, a scratch file, or notes: every such call will fail and the turn is wasted. Do not create branches or commits either.`,
+        job.kind === 'codex'
+          ? `Your sandbox is read-only, enforced by the operating system, and has no network. Do not attempt to create, write or save ANY file, including a plan document, a scratch file, or notes: every such attempt will fail and the turn is wasted. Do not create branches or commits either.`
+          : `The Edit, Write and NotebookEdit tools are NOT available to you in this job — not restricted, absent. Do not attempt to create, write or save ANY file, including a plan document, a scratch file, or notes: every such call will fail and the turn is wasted. Do not create branches or commits either.`,
         `Your final message IS the deliverable. The bridge captures it verbatim and saves it as the plan file on your behalf, so anything you would have written to disk belongs in that message instead.`,
       );
     } else {
       lines.push(
-        `This is EXECUTE mode. You are on branch "${job.branch}" (created from "${job.base_branch}"). Rules: stay on this branch; do not checkout, merge, rebase, reset --hard, push, or force-push anything — the bridge pushes and opens a draft PR afterwards. Commit your work in logical commits with clear messages; leave the working tree clean when you finish.`,
+        `This is EXECUTE mode. You are on branch "${job.branch}" (created from "${job.base_branch}"). Rules: stay on this branch; do not checkout, merge, rebase, reset --hard, push, or force-push anything — the bridge pushes and opens a draft PR afterwards. ${job.sandbox === 'workspace-write'
+          ? 'You cannot commit: .git is read-only in your sandbox, and it has no network, so dependencies cannot be installed. Leave your changes in the working tree; the bridge commits them after you finish, with your final summary as the commit message.'
+          : 'Commit your work in logical commits with clear messages; leave the working tree clean when you finish.'}`,
         remote ? `A remote exists; a human will review the PR, so write commit messages and a final summary that a reviewer can follow.` : `There is no remote; the branch stays local and a human will review it there.`,
       );
       if (job.setup?.preflight) lines.push(`Before finishing, work through the checklist in .claude/preflight.md and fix anything it catches that relates to your change.`);
@@ -734,10 +767,13 @@ export class JobManager {
     return lines.join('\n');
   }
 
-  spawnClaude(job, args) {
+  /** Run the job's CLI (Claude Code or Codex) and feed its JSONL to the matching parser. */
+  spawnAgent(job, args, { input = null } = {}) {
     return new Promise(resolve => {
       const dir = job.worktree || job.project_path;
-      const bin = this.cfg.claude.bin || 'claude';
+      const codex = job.kind === 'codex';
+      const bin = codex ? (this.cfg.codex?.bin || 'codex') : (this.cfg.claude.bin || 'claude');
+      const onLine = codex ? l => this.handleCodexEvent(job, l) : l => this.handleEvent(job, l);
       const env = {
         PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, LANG: process.env.LANG || 'C.UTF-8', TERM: 'dumb',
         SHELL: process.env.SHELL || '/bin/bash',
@@ -760,15 +796,20 @@ export class JobManager {
       if (job.failover_used && this.cfg.failover?.api_key) {
         env.ANTHROPIC_API_KEY = this.cfg.failover.api_key;
       }
+      if (codex) Object.assign(env, codexEnv(this.cfg, {}));
       const streamFile = fs.openSync(path.join(this.jobDir(job.id), 'stream.jsonl'), 'a');
       let child;
       try {
-        child = spawn(bin, args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+        child = spawn(bin, args, { cwd: dir, env, stdio: [input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: true });
       } catch (e) {
         fs.closeSync(streamFile);
         return resolve({ code: -1, lastStderr: e.message });
       }
       job.pid = child.pid;
+      if (input != null) {
+        child.stdin.on('error', () => { /* child exited before reading; its exit code says why */ });
+        child.stdin.end(input);
+      }
       this.save(job, { immediate: true });
       const timeoutMs = job.limits.timeout_minutes * 60_000;
       let timedOut = false;
@@ -785,7 +826,7 @@ export class JobManager {
           if (!line.trim()) continue;
           const safe = scrub(line);
           try { fs.writeSync(streamFile, safe + '\n'); } catch { /* ignore */ }
-          this.handleEvent(job, line);
+          onLine(line);
         }
       });
       child.stderr.on('data', chunk => {
@@ -797,7 +838,7 @@ export class JobManager {
       child.on('error', e => { lastStderr += e.message; });
       child.on('close', code => {
         clearTimeout(timer);
-        if (buf.trim()) { try { fs.writeSync(streamFile, scrub(buf) + '\n'); } catch { /* ignore */ } this.handleEvent(job, buf); }
+        if (buf.trim()) { try { fs.writeSync(streamFile, scrub(buf) + '\n'); } catch { /* ignore */ } onLine(buf); }
         fs.closeSync(streamFile);
         this.procs.delete(job.id);
         job.pid = null;
@@ -812,6 +853,26 @@ export class JobManager {
     if (!pid) return;
     try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
     setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } } }, 5000).unref();
+  }
+
+  handleCodexEvent(job, line) {
+    let ev;
+    try { ev = JSON.parse(line); } catch { this.appendTranscript(job, `raw: ${trunc(line, 300)}`); return; }
+    applyCodexEvent(job, ev, { transcript: l => this.appendTranscript(job, l), pricing: this.cfg.codex?.pricing });
+    if (codexMessageText(ev)) job.result_text = scrub(job.result_text);
+    this.save(job);
+  }
+
+  /** After Codex exits: take the final message from its own file if the stream
+   *  never carried one, and file the plan. Claude does both from its result event. */
+  finishCodexResult(job, lastMessageFile) {
+    if (!job.result_text) {
+      try { const t = fs.readFileSync(lastMessageFile, 'utf8').trim(); if (t) job.result_text = scrub(t); } catch { /* none written */ }
+    }
+    if (job.mode === 'plan' && job.result_text && job._resultSeen) {
+      const pf = path.join(this.jobDir(job.id), 'plan.md');
+      try { fs.writeFileSync(pf, job.result_text + '\n'); job.plan_file = pf; } catch { /* ignore */ }
+    }
   }
 
   handleEvent(job, line) {
@@ -877,8 +938,14 @@ export class JobManager {
       if (st.dirty) {
         job.activity = 'committing leftover changes';
         await git(['add', '-A'], { cwd: dir, timeoutMs: 60_000 });
-        await git(['-c', `user.name=${authorName(this.cfg)}`, '-c', `user.email=${authorEmail(this.cfg)}`, 'commit', '--quiet', '-m', `chore(bridge): ${abnormal ? 'partial work' : 'leftover changes'} from job ${job.id}\n\n${trunc(job.summary, 200)}`], { cwd: dir, timeoutMs: 60_000 });
-        job.notes.push(`bridge committed ${st.entries.length} leftover change(s) the agent left uncommitted`);
+        // A Codex agent in the workspace-write sandbox cannot commit at all, so
+        // its changes are not leftovers: they get a real message from its summary.
+        const forAgent = job.sandbox === 'workspace-write' && !abnormal;
+        const message = forAgent
+          ? `${trunc(job.summary, 72)}\n\n${trunc(job.result_text || '', 3000)}\n\nCommitted by the bridge for Codex job ${job.id}: its workspace-write sandbox keeps .git read-only.`
+          : `chore(bridge): ${abnormal ? 'partial work' : 'leftover changes'} from job ${job.id}\n\n${trunc(job.summary, 200)}`;
+        await git(['-c', `user.name=${authorName(this.cfg)}`, '-c', `user.email=${authorEmail(this.cfg)}`, 'commit', '--quiet', '-m', message], { cwd: dir, timeoutMs: 60_000 });
+        job.notes.push(forAgent ? `bridge committed the agent's ${st.entries.length} change(s) (its sandbox cannot write .git)` : `bridge committed ${st.entries.length} leftover change(s) the agent left uncommitted`);
         this.appendTranscript(job, `committed ${st.entries.length} leftover change(s)`);
       }
       const base = job.base_branch;
