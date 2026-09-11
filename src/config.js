@@ -31,6 +31,12 @@ export const DEFAULTS = {
     // Hard cap on how many job records list_jobs returns.
     list_jobs_max: 50,
   },
+  learnings: {
+    enabled: true,
+    dir: path.join(REPO_ROOT, 'learnings'),
+    max_age_days: 90,
+    prompt_chars: 6000,
+  },
   clone: {
     depth: 1,
     timeout_seconds: 600,
@@ -206,6 +212,7 @@ export function loadConfig(overridePath = process.env.BRIDGE_CONFIG) {
   cfg.workspace_root = path.resolve(expandHome(cfg.workspace_root));
   cfg.data_dir = path.resolve(expandHome(cfg.data_dir));
   cfg.server.token_file = path.resolve(expandHome(cfg.server.token_file));
+  cfg.learnings.dir = path.resolve(expandHome(cfg.learnings.dir));
   // Existing installations keep their history and bearer token. Only the new
   // conventional defaults can fall back; explicit custom paths stay untouched.
   cfg.data_dir = existingBridgePath(cfg.data_dir, '.local/share/code-bridge', '.local/share/claude-code-bridge');

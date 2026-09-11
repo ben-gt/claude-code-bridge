@@ -3,3 +3,5 @@ data/
 *.log
 .env
 config.local.json
+learnings/observations/
+learnings/INDEX.md

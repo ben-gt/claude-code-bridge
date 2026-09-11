@@ -1,5 +1,14 @@
 # Code Bridge
 
+Jobs now retain factual operational observations in [learnings/](learnings/README.md).
+Failures and bridge notes are saved as scrubbed, source-linked Markdown evidence;
+subsequent jobs receive recent observations for the same project, engine, and mode.
+Assistant hypotheses are not promoted to facts. Run `npm run learnings:maintain`
+to consolidate the index, or install daily maintenance with
+`sh scripts/install-learnings-cron.sh`. See the folder guide for configuration,
+retention, evidence limits, and the distinction between an observed error and a
+verified remedy.
+
 An MCP server (Streamable HTTP) that exposes **Claude Code in headless mode** — and, per job, the **OpenAI Codex CLI** — to chat surfaces such as Open WebUI, so engineering tasks can be dispatched against any git repository under `~/code` — and new repos pulled down — without opening a terminal.
 
 It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, loads shared guidelines and project instructions for either engine, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and **never merges anything**.

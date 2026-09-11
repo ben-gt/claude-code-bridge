@@ -9,6 +9,7 @@ import { projectOverrides } from './config.js';
 import { detectClaudeSetup } from './projects.js';
 import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
+import { Learnings } from './learnings.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
 import { selectModel, resolveEngine, EFFORT_LEVELS } from './models.js';
 import { codexArgs, codexEnv, codexSandbox, applyCodexEvent, codexMessageText } from './codex.js';
@@ -50,6 +51,7 @@ export class JobManager {
     this.asker = asker;
     this.projects = projectIndex;
     this.log = log;
+    this.learnings = new Learnings(cfg, { log });
     this.jobsDir = path.join(cfg.data_dir, 'jobs');
     fs.mkdirSync(this.jobsDir, { recursive: true });
     this.jobs = new Map();      // id -> record
@@ -59,6 +61,11 @@ export class JobManager {
   }
 
   // ---------- persistence ----------
+  captureLearning(fn) {
+    try { return fn(); }
+    catch (e) { this.log.warn(`learnings: ${scrub(e.message)}`); return ''; }
+  }
+
   recordFile(id) { return path.join(this.jobsDir, id, 'job.json'); }
   jobDir(id) { return path.join(this.jobsDir, id); }
 
@@ -87,6 +94,7 @@ export class JobManager {
           interrupted++;
         }
         this.jobs.set(id, job);
+        this.captureLearning(() => this.learnings.outcome(job));
         loaded++;
       } catch { /* skip corrupt */ }
     }
@@ -515,6 +523,8 @@ export class JobManager {
     // for a genuine quota failure, and only while the goal or job still has
     // budget.
     const fo = this.cfg.failover || {};
+    // Preserve an observed failure even when a retry later succeeds.
+    if (error) this.captureLearning(() => this.learnings.record(job, `Attempt reported ${state}: ${error}`));
     if (
       state === 'failed' && fo.enabled && fo.api_key && !job.failover_used &&
       // Claude jobs only: the key is an Anthropic key and means nothing to Codex.
@@ -542,6 +552,7 @@ export class JobManager {
     this.procs.delete(job.id);
     this.save(job, { immediate: true });
     this.appendTranscript(job, `== job ${state}${error ? `: ${error}` : ''}`);
+    this.captureLearning(() => this.learnings.outcome(job));
     // A child reports to the blackboard however it ended. A failure is a
     // finding too — the next child should not spend money rediscovering it.
     this.notify?.jobFinished(job);
@@ -734,6 +745,8 @@ export class JobManager {
       // budget flag, so a Codex job is told only the limit that actually applies.
       `You have ${job.kind === 'codex' ? `a hard limit of ${job.limits.timeout_minutes} minutes for this job. It is` : `a hard budget of $${Number(job.limits.max_cost_usd).toFixed(2)} for this job and a hard limit of ${job.limits.timeout_minutes} minutes. Both are`} enforced by killing the run — there is no grace period and no partial credit, so a job that spends everything investigating delivers nothing at all. Pace yourself against that: prefer landing a smaller, correct, well-explained result over an exhaustive one you do not finish. If you find yourself running long, stop exploring and write up what you have established, what you changed, and what remains — an honest partial answer is worth far more than being cut off mid-sentence.`,
     ];
+    const priorLearnings = this.captureLearning(() => this.learnings.context(job));
+    if (priorLearnings) lines.push('--- HISTORICAL EVIDENCE ---', priorLearnings, '--- END HISTORICAL EVIDENCE ---');
     if (job.goal_id && this.goals) {
       const g = this.goals.goals.get(job.goal_id);
       if (g) {
@@ -868,6 +881,7 @@ export class JobManager {
   handleCodexEvent(job, line) {
     let ev;
     try { ev = JSON.parse(line); } catch { this.appendTranscript(job, `raw: ${trunc(line, 300)}`); return; }
+    this.captureLearning(() => this.learnings.event(job, ev));
     applyCodexEvent(job, ev, { transcript: l => this.appendTranscript(job, l), pricing: this.cfg.codex?.pricing });
     if (codexMessageText(ev)) job.result_text = scrub(job.result_text);
     this.save(job);
@@ -888,6 +902,7 @@ export class JobManager {
   handleEvent(job, line) {
     let ev;
     try { ev = JSON.parse(line); } catch { this.appendTranscript(job, `raw: ${trunc(line, 300)}`); return; }
+    this.captureLearning(() => this.learnings.event(job, ev));
     const t = ev.type;
     if (t === 'system' && ev.subtype === 'init') {
       job.session_id = ev.session_id || job.session_id;

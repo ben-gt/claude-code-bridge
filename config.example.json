@@ -23,6 +23,12 @@
     "max_cost_usd": 5,
     "list_jobs_max": 50
   },
+  "learnings": {
+    "_comment": "Factual Markdown evidence. dir defaults to learnings/ in the bridge installation; override it for external storage. Daily cron is installed separately with scripts/install-learnings-cron.sh.",
+    "enabled": true,
+    "max_age_days": 90,
+    "prompt_chars": 6000
+  },
   "clone": {
     "_comment": "hosts: which git hosts list_available_repos / draft-PR creation talk to. Credentials come from `git credential fill` (your git credential helper) \u2014 never from this file. type: github | gitea | gitlab. api_base overrides the default API URL.",
     "depth": 1,
