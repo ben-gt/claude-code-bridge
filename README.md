@@ -41,6 +41,8 @@ Job states: `queued → running → completed | failed | cancelled | interrupted
 
 Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents and skills itself — the bridge doesn't strip any of that; it only layers the unattended-run rules on top via `--append-system-prompt`. Projects with no `.claude` setup run plainly.
 
+Every Claude and Codex job also receives the bridge installation's [AGENTS.md](AGENTS.md), including shared development, DRY, and adapted JPL Power of Ten guidance. The bridge reads this file when building each job's instructions, independently of the target repository or disposable worktree. Claude receives it through `--append-system-prompt`; Codex receives it through `developer_instructions`. Project-specific conventions take precedence over shared defaults; bridge job constraints (such as plan mode and branch handling) take precedence over conflicting workflow instructions. Missing, unreadable, or empty shared guidelines prevent the job from launching. Once this integration is running, edits to the file apply to subsequent jobs without restarting the service; already-running jobs keep their original instructions.
+
 Codex jobs (`engine: "codex"`) go through the same steps with `codex exec` in place of `claude -p` — see [Codex engine](#codex-engine).
 
 ### Where things live

@@ -713,7 +713,16 @@ export class JobManager {
   }
 
   systemPrompt(job, { remote }) {
+    // Resolve against the bridge installation, not the target repo/worktree.
+    // Read at launch so edits apply to subsequent jobs without a restart.
+    const sharedGuidelines = fs.readFileSync(new URL('../AGENTS.md', import.meta.url), 'utf8').trim();
+    if (!sharedGuidelines) throw new Error('Bridge AGENTS.md is empty; cannot launch without shared guidelines');
     const lines = [
+      '--- SHARED DEVELOPMENT GUIDELINES (bridge AGENTS.md) ---',
+      sharedGuidelines,
+      '--- END SHARED DEVELOPMENT GUIDELINES ---',
+      `Apply these shared defaults alongside the target project's instructions. More specific project conventions take precedence over shared defaults; the bridge job constraints below take precedence over conflicting development workflow instructions.`,
+      '',
       `You are running unattended through the Claude Code Bridge (job ${job.id}) in an isolated git worktree of the repository "${job.project}". Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
       `This worktree contains committed state only: untracked files from the project's main checkout (local .env files, node_modules, build output) are absent. If the task needs dependencies to build or test, install them here first; if a local-only file the task needs is missing, say so in your summary instead of guessing.`,
       `Stay inside this worktree. Never print secrets, tokens, or the contents of .env files in your output.`,
