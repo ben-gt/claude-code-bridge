@@ -81,3 +81,94 @@ test('tool capture and prompt payload are bounded; disabled store writes nothing
   assert.deepEqual(disabled.maintain(), { disabled: true });
   assert.equal(fs.existsSync(disabled.dir), false);
 });
+
+function report(job, overrides = {}) {
+  job.state = 'completed';
+  job.result_text = '```bridge-learnings\n' + JSON.stringify([{
+    topic: 'Dependency setup', problem: 'Tests need dependencies', change: 'Installed dependencies',
+    verification: 'npm test', environment: 'Node 22, revision abc123', scope: 'project', ...overrides,
+  }]) + '\n```';
+}
+
+function command(store, job, exit_code = 0) {
+  store.event(job, { type: 'item.completed', item: { id: 'check', type: 'command_execution', command: 'npm test', exit_code, aggregated_output: 'test output' } });
+}
+
+test('verified lessons survive restart, cross engine/mode within project, and appear in topic index', t => {
+  const { store, cfg, job } = fixture(t);
+  command(store, job);
+  report(job);
+  store.outcome(job);
+  const restored = new Learnings(cfg);
+  assert.match(restored.context({ ...job, kind: 'claude', mode: 'plan' }), /Installed dependencies/);
+  assert.equal(restored.context({ ...job, project: 'other' }), '');
+  const record = restored.read().records[0];
+  assert.equal(record.lesson.check.status, 'exit 0');
+  assert.equal(record.lesson.check.output, 'test output');
+  restored.maintain();
+  assert.match(fs.readFileSync(path.join(store.dir, 'INDEX.md'), 'utf8'), /dependency setup/);
+  restored.outcome(job);
+  assert.equal(restored.read().records.length, 1);
+});
+
+test('unverified, failed, superseded, and incomplete job lessons are not accepted', t => {
+  for (const scenario of ['missing', 'failure', 'superseded', 'incomplete', 'malformed']) {
+    const { store, job } = fixture(t);
+    if (scenario !== 'missing') command(store, job);
+    if (scenario === 'failure' || scenario === 'superseded') command(store, job, 1);
+    report(job);
+    if (scenario === 'incomplete') job.state = 'failed';
+    if (scenario === 'malformed') job.result_text = '```bridge-learnings\n[invalid]\n```';
+    store.outcome(job);
+    assert.equal(store.read().records.filter(r => r.lesson).length, 0, scenario);
+  }
+});
+
+test('Claude lessons require matching Bash invocation and explicit non-error result', t => {
+  const { store, job } = fixture(t);
+  job.kind = 'claude';
+  store.event(job, { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'bash1', name: 'Bash', input: { command: 'npm test' } }] } });
+  store.event(job, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'bash1', is_error: false, content: 'passed' }] } });
+  report(job, { scope: 'engine' });
+  store.outcome(job);
+  assert.match(store.context({ ...job, mode: 'plan' }), /Installed dependencies/);
+  assert.equal(store.context({ ...job, kind: 'codex' }), '');
+});
+
+test('lesson metadata is scrubbed, hash protected, and expires', t => {
+  const { store, job } = fixture(t);
+  addSecret('lesson-secret-value');
+  command(store, job);
+  report(job, { change: 'lesson-secret-value' });
+  store.outcome(job);
+  const record = store.read().records[0];
+  assert.doesNotMatch(JSON.stringify(record), /lesson-secret-value/);
+  const file = path.join(store.dir, 'observations', record.file);
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('Node 22', 'Node 23'));
+  assert.equal(store.read().rejected.length, 1);
+  const fresh = fixture(t);
+  command(fresh.store, fresh.job);
+  report(fresh.job);
+  fresh.job.finished_at = '2000-01-01T00:00:00.000Z';
+  fresh.store.outcome(fresh.job);
+  assert.equal(fresh.store.context(fresh.job), '');
+});
+
+test('lesson report limits reject oversized fields and evicted verification explicitly', t => {
+  const { store, job } = fixture(t);
+  const warnings = [];
+  store.log = { warn: message => warnings.push(message) };
+  command(store, job);
+  for (let i = 0; i < 100; i++) {
+    store.event(job, { type: 'item.completed', item: { id: String(i), type: 'command_execution', command: `check ${i}`, exit_code: 0 } });
+  }
+  report(job);
+  store.outcome(job);
+  assert.equal(store.read().records.length, 0);
+  assert.match(warnings[0], /no matching successful tool result/);
+  command(store, job);
+  report(job, { change: 'x'.repeat(1001) });
+  store.outcome(job);
+  assert.equal(store.read().records.length, 0);
+  assert.match(warnings[1], /invalid lesson fields/);
+});

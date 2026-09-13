@@ -10,6 +10,7 @@ import { detectClaudeSetup } from './projects.js';
 import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { Learnings } from './learnings.js';
+import { lessonInstructions } from './learning-lessons.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
 import { selectModel, resolveEngine, EFFORT_LEVELS } from './models.js';
 import { codexArgs, codexEnv, codexSandbox, applyCodexEvent, codexMessageText } from './codex.js';
@@ -745,6 +746,7 @@ export class JobManager {
       // budget flag, so a Codex job is told only the limit that actually applies.
       `You have ${job.kind === 'codex' ? `a hard limit of ${job.limits.timeout_minutes} minutes for this job. It is` : `a hard budget of $${Number(job.limits.max_cost_usd).toFixed(2)} for this job and a hard limit of ${job.limits.timeout_minutes} minutes. Both are`} enforced by killing the run — there is no grace period and no partial credit, so a job that spends everything investigating delivers nothing at all. Pace yourself against that: prefer landing a smaller, correct, well-explained result over an exhaustive one you do not finish. If you find yourself running long, stop exploring and write up what you have established, what you changed, and what remains — an honest partial answer is worth far more than being cut off mid-sentence.`,
     ];
+    if (this.learnings.enabled) lines.push(lessonInstructions);
     const priorLearnings = this.captureLearning(() => this.learnings.context(job));
     if (priorLearnings) lines.push('--- HISTORICAL EVIDENCE ---', priorLearnings, '--- END HISTORICAL EVIDENCE ---');
     if (job.goal_id && this.goals) {

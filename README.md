@@ -3,7 +3,10 @@
 Jobs now retain factual operational observations in [learnings/](learnings/README.md).
 Failures and bridge notes are saved as scrubbed, source-linked Markdown evidence;
 subsequent jobs receive recent observations for the same project, engine, and mode.
-Assistant hypotheses are not promoted to facts. Run `npm run learnings:maintain`
+Completed jobs can also retain structured lessons backed by successful tool
+results, reusable within the project and grouped by agent-assigned topic.
+Explanations remain claims; passing checks do not prove a root cause.
+Run `npm run learnings:maintain`
 to consolidate the index, or install daily maintenance with
 `sh scripts/install-learnings-cron.sh`. See the folder guide for configuration,
 retention, evidence limits, and the distinction between an observed error and a
