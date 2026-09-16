@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loadConfig, REPO_ROOT } from './config.js';
 import { ProjectIndex } from './projects.js';
 import { JobManager } from './jobs.js';
+import { IntegrationManager } from './integrations.js';
 import { GoalManager } from './goals.js';
 import { Notifier } from './notify.js';
 import { Asker } from './ask.js';
@@ -62,6 +63,8 @@ async function main() {
   const asker = new Asker(cfg, notify, { log });
   const jobs = new JobManager(cfg, projects, { log, goals, notify, asker });
   jobs.init();
+  const integrations = new IntegrationManager(cfg, jobs);
+  await integrations.init();
   cleanCloneTemp(cfg);
   const self = await detectSelfComposeProject();
   const composeVer = await dockerAvailable();
@@ -75,7 +78,7 @@ async function main() {
   app.use(express.json({ limit: '4mb' }));
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, version: VERSION, running_jobs: jobs.runningCount(), workspace_root: cfg.workspace_root });
+    res.json({ ok: true, version: VERSION, running_jobs: jobs.runningCount() + integrations.runningCount(), workspace_root: cfg.workspace_root });
   });
 
   // Bearer auth — same scheme as the other MCP servers registered in Open WebUI.
@@ -93,12 +96,12 @@ async function main() {
   const handle = async (req, res) => {
     const server = new McpServer({ name: 'code-bridge', version: VERSION }, { instructions: [
       `Code Bridge: dispatches engineering tasks to Claude Code or OpenAI Codex against repositories under ${cfg.workspace_root}, and clones new ones.`,
-      'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Nothing is ever merged automatically.',
+      'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Ordinary tasks never merge. For guarded testing integrations use plan_integration, get_integration_status, execute_integration, then publish_integration. Existing branches are never updated.',
       'Jobs run in disposable git worktrees: a dirty checkout never blocks a job and jobs never touch the checkout. Deploying a stack that builds from its checkout: merge the PR, update_checkout, compose_redeploy (projects carry a note in list_projects when this applies).',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
       engineGuidance(cfg),
     ].join('\n') });
-    registerTools(server, { cfg, projects, jobs, goals, notify, log });
+    registerTools(server, { cfg, projects, jobs, goals, integrations, notify, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {

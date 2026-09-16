@@ -3,11 +3,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { scrub } from './scrub.js';
+import { z } from 'zod';
+import { scrub, scrubDeep } from './scrub.js';
 import { extractLessons, trackVerification, validLessonFields } from './learning-lessons.js';
 
 const MAX_FILES = 10000;
 const MAX_BYTES = 20000;
+const MAX_PAGE_BYTES = 64000;
+export const learningListSchema = z.object({
+  project: z.string().min(1).max(2000).optional().describe('Exact project name; omit to list all projects'),
+  type: z.enum(['all', 'observation', 'lesson']).default('all'),
+  include_stale: z.boolean().default(false).describe('Include evidence older than the configured retention window'),
+  offset: z.number().int().min(0).max(MAX_FILES).default(0),
+  limit: z.number().int().min(1).max(20).default(10).describe('Maximum records per page; large records may produce a shorter page'),
+});
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clean = value => scrub(String(value ?? '')).slice(0, 2000);
 const evidenceId = r => hash(JSON.stringify([r.version, r.job_id, r.project, r.engine, r.mode, r.source, r.observation, ...(r.version === 2 ? [r.observed_at, r.lesson] : [])]));
@@ -118,6 +127,42 @@ export class Learnings {
       groups.set(key, group);
     }
     return [...groups.values()].sort((a, b) => Date.parse(b.last_seen) - Date.parse(a.last_seen));
+  }
+
+  list(options = {}) {
+    const { project, type, include_stale, offset, limit } = learningListSchema.parse(options);
+    const result = { enabled: this.enabled, learnings: [], total: 0, offset, next_offset: null, rejected_count: 0 };
+    if (!this.enabled) return result;
+    const { records, rejected } = this.read();
+    // Share aging with prompt/index grouping: a recent repeat keeps its group current.
+    const staleFiles = new Set(this.groups(records).filter(group => group.stale).flatMap(group => group.evidence));
+    const matches = records.filter(record =>
+      (project === undefined || record.project === project) &&
+      (type === 'all' || (record.lesson ? 'lesson' : 'observation') === type) &&
+      (include_stale || !staleFiles.has(record.file))
+    ).sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at) || a.file.localeCompare(b.file));
+    result.total = matches.length;
+    result.rejected_count = rejected.length;
+    let bytes = 0;
+    for (const record of matches.slice(offset, offset + limit)) {
+      const entry = scrubDeep({
+        type: record.lesson ? 'lesson' : 'observation', project: record.project,
+        engine: record.engine, mode: record.mode, observed_at: record.observed_at,
+        job_id: record.job_id, source: record.source, observation: record.observation,
+        evidence: `observations/${record.file}`, stale: staleFiles.has(record.file),
+        ...(record.lesson ? { lesson: record.lesson } : {}),
+      });
+      const size = Buffer.byteLength(JSON.stringify(entry));
+      if (bytes + size > MAX_PAGE_BYTES) {
+        if (!result.learnings.length) throw new Error('learning exceeds listing page byte limit');
+        break;
+      }
+      result.learnings.push(entry);
+      bytes += size;
+    }
+    const next = offset + result.learnings.length;
+    if (next < result.total) result.next_offset = next;
+    return result;
   }
 
   context(job) {

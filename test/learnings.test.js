@@ -172,3 +172,82 @@ test('lesson report limits reject oversized fields and evicted verification expl
   assert.equal(store.read().records.length, 0);
   assert.match(warnings[1], /invalid lesson fields/);
 });
+
+test('listing filters records, orders newest first, and paginates without losing evidence', t => {
+  const { store, job } = fixture(t);
+  const timestamp = new Date().toISOString();
+  store.record({ ...job, id: 'first', finished_at: timestamp }, 'first observation');
+  store.record({ ...job, id: 'second', finished_at: timestamp }, 'second observation');
+  store.record({ ...job, id: 'other', project: 'other' }, 'other project');
+  store.record({ ...job, id: 'old', finished_at: '2000-01-01T00:00:00.000Z' }, 'old observation');
+  command(store, job);
+  report(job);
+  store.outcome(job);
+  const all = store.list({ project: 'app' });
+  assert.equal(all.total, 3);
+  const first = store.list({ project: 'app', limit: 1 });
+  const rest = store.list({ project: 'app', offset: first.next_offset });
+  assert.deepEqual([...first.learnings, ...rest.learnings], all.learnings);
+  assert.equal(rest.next_offset, null);
+  assert.equal(store.list({ project: 'app', type: 'observation' }).total, 2);
+  const lessons = store.list({ type: 'lesson' });
+  assert.equal(lessons.total, 1);
+  assert.equal(lessons.learnings[0].lesson.check.passed, true);
+  assert.match(lessons.learnings[0].source, /stream.jsonl/);
+  assert.equal(store.list({ include_stale: true }).total, 5);
+  assert.equal(store.list({ include_stale: true }).learnings.at(-1).stale, true);
+  assert.equal(store.list({ offset: 100 }).next_offset, null);
+  assert.equal(store.list({ project: 'missing' }).total, 0);
+});
+
+test('listing reports invalid records, scrubs newly registered secrets, and respects disabled storage', t => {
+  const { store, cfg, job } = fixture(t);
+  assert.equal(store.list().total, 0);
+  store.record(job, 'listing-late-secret');
+  addSecret('listing-late-secret');
+  fs.writeFileSync(path.join(store.dir, 'observations', 'invalid.md'), 'bad');
+  assert.equal(store.list().rejected_count, 1);
+  assert.doesNotMatch(JSON.stringify(store.list()), /listing-late-secret/);
+  const disabled = new Learnings({ ...cfg, learnings: { ...cfg.learnings, enabled: false } });
+  assert.deepEqual(disabled.list(), { enabled: false, learnings: [], total: 0, offset: 0, next_offset: null, rejected_count: 0 });
+  for (const options of [{ limit: 0 }, { limit: 21 }, { offset: -1 }, { offset: 0.5 }, { type: 'invalid' }, { include_stale: 'yes' }]) {
+    assert.throws(() => store.list(options));
+  }
+});
+
+test('listing byte limit shortens pages and supplies a continuation', t => {
+  const { store, job } = fixture(t);
+  for (let i = 0; i < 20; i++) store.record({ ...job, id: `large_${i}` }, '界'.repeat(2000));
+  const page = store.list({ limit: 20 });
+  assert.ok(page.learnings.length > 0 && page.learnings.length < 20);
+  assert.equal(page.next_offset, page.learnings.length);
+  const next = store.list({ limit: 20, offset: page.next_offset });
+  assert.equal(page.learnings.length + next.learnings.length, 20);
+});
+
+test('list_learnings works through the MCP client, validates input and returns structured errors', async t => {
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const { registerTools } = await import('../src/tools.js');
+  const { DEFAULTS } = await import('../src/config.js');
+  const { store, job } = fixture(t);
+  store.record(job, 'MCP evidence');
+  const server = new McpServer({ name: 'test', version: '1.0.0' });
+  registerTools(server, { cfg: DEFAULTS, projects: {}, jobs: { learnings: store }, log: quiet });
+  const client = new Client({ name: 'test-client', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const listed = await client.listTools();
+  assert.equal(listed.tools.find(tool => tool.name === 'list_learnings').annotations.readOnlyHint, true);
+  const result = await client.callTool({ name: 'list_learnings', arguments: { project: 'app' } });
+  assert.equal(result.structuredContent.learnings[0].observation, 'MCP evidence');
+  const invalid = await client.callTool({ name: 'list_learnings', arguments: { limit: 21 } });
+  assert.equal(invalid.isError, true);
+  t.mock.method(store, 'read', () => { throw new Error('evidence scan failed'); });
+  const failed = await client.callTool({ name: 'list_learnings', arguments: {} });
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0].text, /evidence scan failed/);
+});

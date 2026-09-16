@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { OperationTracker } from '../src/operations.js';
+const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return { promise, resolve, reject }; };
+test('concurrent direct calls are visible until settled; safe metadata only', async () => {
+  let now = 1000;
+  const tracker = new OperationTracker({ now: () => now });
+  const first = deferred(), second = deferred();
+  const a = tracker.run('update_checkout', { project: 'submissions', password: 'secret' }, () => first.promise);
+  const b = tracker.run('compose_restart', { project: 'deploy' }, () => second.promise);
+  now += 2500;
+  assert.equal(tracker.snapshot().active_count, 2);
+  assert.equal(tracker.snapshot().active[0].elapsed_seconds, 2.5);
+  assert(!JSON.stringify(tracker.snapshot()).includes('secret'));
+  first.resolve({ content: [{ text: 'private output' }] }); await a;
+  assert.equal(tracker.snapshot().active_count, 1);
+  second.resolve({ isError: true }); await b;
+  assert.equal(tracker.snapshot().active_count, 0);
+  assert.deepEqual(tracker.snapshot().recent.map(r => r.state), ['failed', 'completed']);
+  assert(!JSON.stringify(tracker.snapshot()).includes('private output'));
+});
+test('exceptions clear activity; observer calls never become work', async () => {
+  const tracker = new OperationTracker();
+  await assert.rejects(tracker.run('clone_project', {}, async () => { throw new Error('private'); }));
+  assert.equal(tracker.snapshot().active_count, 0);
+  assert.equal(tracker.snapshot().recent[0].state, 'failed');
+  const wait = deferred();
+  const call = tracker.run('get_task_status', {}, () => wait.promise);
+  assert.equal(tracker.snapshot().active_count, 0);
+  wait.resolve({}); await call;
+  assert.equal(tracker.snapshot().recent.length, 1);
+});
+test('bounded lists preserve exact active total and flag missing rows', async () => {
+  const tracker = new OperationTracker({ activeLimit: 1, recentLimit: 1 });
+  const wait = deferred();
+  const calls = [tracker.run('one', {}, () => wait.promise), tracker.run('two', {}, () => wait.promise)];
+  assert.equal(tracker.snapshot().active_count, 2);
+  assert.equal(tracker.snapshot().active.length, 1);
+  assert.equal(tracker.snapshot().active_limited, true);
+  wait.resolve({}); await Promise.all(calls);
+  assert.equal(tracker.snapshot().active_count, 0);
+  assert.equal(tracker.snapshot().recent.length, 1);
+});

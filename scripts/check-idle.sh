@@ -9,8 +9,8 @@ for state in running queued; do
     process.stdin.on("data", d => s += d).on("end", () => {
       const result = JSON.parse(s);
       if (!Array.isArray(result.jobs)) process.exit(1);
-      if (result.jobs.length) {
-        console.error("Code Bridge has active jobs; retry after they finish.");
+      if (result.jobs.length || result.active_integrations > 0 || (result.operations?.active_count ?? 0) > 0) {
+        console.error("Code Bridge has active jobs, integrations or direct tool operations; retry after they finish.");
         process.exit(2);
       }
     });'

@@ -14,7 +14,7 @@ verified remedy.
 
 An MCP server (Streamable HTTP) that exposes **Claude Code in headless mode** — and, per job, the **OpenAI Codex CLI** — to chat surfaces such as Open WebUI, so engineering tasks can be dispatched against any git repository under `~/code` — and new repos pulled down — without opening a terminal.
 
-It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, loads shared guidelines and project instructions for either engine, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and **never merges anything**.
+It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, loads shared guidelines and project instructions for either engine, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and never merges ordinary tasks. The separate [guarded integration workflow](INTEGRATIONS.md) can assemble a new testing candidate without updating existing branches.
 
 - Port: **4010** (near the other MCP servers on this box: 3001, 4005). Endpoint: `POST /mcp`. Health: `GET /health`.
 - Auth: **Bearer token** — the same scheme as the other MCP connections registered in Open WebUI.
@@ -28,11 +28,12 @@ It is general-purpose infrastructure: it knows nothing about any particular proj
 | `list_projects` | Rescan `~/code` and list every git repo: name, current/default branch, remote (creds stripped), dirty flag, `.claude` setup (CLAUDE.md / preflight / agents), agent names, compose file names. Compact by default (~16 KB for 60 repos); `verbose=true` adds paths, agent descriptions and compose metadata. Optional `filter`. |
 | `clone_project` | Clone into `~/code/<name>` using the stored git credentials. Args: `url` **or** `repo` (`owner/repo` + optional `host`), optional `name`, `branch`, `depth`, `full_history`. Shallow by default. Never overwrites — an existing dir returns its path untouched. |
 | `list_available_repos` | Repos visible to the stored credentials on each configured host (GitHub, Gitea, GitLab). Marks ones already cloned. Args: `host`, `query`, `limit`. |
-| `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `engine` (`codex` default \| `claude`), `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
+| `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), required `base_branch` for execute; optional `engine` (`codex` default \| `claude`), `agent`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
 | `get_task_status` | State, elapsed, current activity, branch, PR URL, model, cost, final result / plan text. **Long-polls while a job is active** (`wait_seconds`, default 20, max 50): one call waits for the next state/activity change instead of the caller spinning. Running jobs get a lean payload (~350 bytes); the full record arrives when the job ends. |
 | `get_task_log` | Scrubbed human-readable transcript; `offset` → `next_offset` for incremental polling; `raw=true` for the stream-json events. |
 | `cancel_task` | Kill a queued/running job. Default: discard uncommitted agent work, restore the original branch, delete the job branch. `keep_branch=true` commits partial work and keeps the branch. |
 | `list_jobs` | Recent jobs (Claude Code, Codex, and compose redeploys) with state, project, model, one-line summary. Filter by `project` / `state`. |
+| `list_learnings` | Read stored observations and lessons, newest first. Filter by `project` and `type` (`all`, `observation`, `lesson`); paginate with `limit` and `offset`. Set `include_stale=true` for older evidence. |
 | `compose_status` | `docker compose ps` — services, state, health, ports, uptime. Read-only, works on protected stacks too. |
 | `compose_logs` | Tail container logs (`services`, `lines`, `since`). Scrubbed. Read-only. |
 | `compose_restart` | `docker compose restart` — no pull, no build. Returns service state before and after. |
@@ -48,7 +49,7 @@ Job states: `queued → running → completed | failed | cancelled | interrupted
 1. Pre-flight: resolve the project inside the workspace boundary, validate the selected engine and optional agent, and queue the job within the global concurrency limit.
 2. Every job gets a disposable git worktree. The project's original checkout stays untouched; uncommitted and untracked files are absent from the job. Multiple jobs can run on a project.
 3. `plan` mode: investigate a detached snapshot using the selected engine's read-only restrictions. The final response is captured as `plan.md`; no branches or commits are created.
-4. `execute` mode: fetch the base branch when a remote exists, create a fresh `bridge/…` branch in a worktree, run the selected engine, and commit remaining changes. Push and open a draft PR when a remote exists; otherwise report the local branch. The bridge never merges. Empty branches are removed.
+4. `execute` mode: require the explicit `base_branch` argument, check any project `allowed_base_branches` restriction, and fetch that base branch when a remote exists, create a fresh `bridge/…` branch in a worktree, run the selected engine, and commit remaining changes. Push and open a draft PR when a remote exists; otherwise report the local branch. Ordinary task jobs never merge. Empty branches are removed. Use the dedicated integration tools to assemble testing candidates.
 5. Every job has a hard timeout. Claude also receives a dollar budget; Codex reports token usage, with estimated costs when pricing is configured. See [Codex engine](#codex-engine) for its sandbox and cost behavior.
 
 Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents and skills itself — the bridge doesn't strip any of that; it only layers the unattended-run rules on top via `--append-system-prompt`. Projects with no `.claude` setup still receive the shared guidelines.
@@ -56,6 +57,33 @@ Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents a
 Every Claude and Codex job also receives the bridge installation's [AGENTS.md](AGENTS.md), including shared development, DRY, and adapted JPL Power of Ten guidance. The bridge reads this file when building each job's instructions, independently of the target repository or disposable worktree. Claude receives it through `--append-system-prompt`; Codex receives it through `developer_instructions`. Project-specific conventions take precedence over shared defaults; bridge job constraints (such as plan mode and branch handling) take precedence over conflicting workflow instructions. Missing, unreadable, or empty shared guidelines prevent the job from launching. Once this integration is running, edits to the file apply to subsequent jobs without restarting the service; already-running jobs keep their original instructions.
 
 Codex jobs (`engine: "codex"`) go through the same steps with `codex exec` in place of `claude -p` — see [Codex engine](#codex-engine).
+
+### Branch selection and job evidence
+
+Execute jobs require `base_branch` as a tool argument, including children of
+`start_goal`. A branch named only inside `prompt` cannot choose a worktree base:
+the bridge creates the worktree before the coding agent reads that prompt.
+Use `list_projects.current_branch` when the user requests the current checkout's
+branch. Plan jobs may omit the base and investigate committed HEAD as before.
+
+Set `projects.<name>.allowed_base_branches` to 1–50 exact branch names to enforce
+a project workflow (for example `["testing/passkeys"]`). Execute submissions
+outside that list are refused. The restriction is checked again at launch;
+queued jobs lacking an explicit base are refused instead of falling back to main.
+`default_branch` remains useful discovery metadata; it no longer supplies an
+implicit execute base. The chosen branch name is stored at submission; the remote
+branch is fetched at launch, so its commit may advance while the job is queued.
+
+`start_task` returns `base_branch` in both its headline and structured result.
+Running status also includes the base. `checkout_status` in dispatch and finished
+status records the original checkout's branch, dirty status, and up to 50 Git
+porcelain status entries with a total count. Missing status is unknown; this
+snapshot can change after submission. It is separate from a job worktree's status,
+which cannot reveal local uncommitted files in the original checkout.
+
+A completed coding job can still have failed validation commands. Report tests,
+lint, and typechecking individually from their completed results. Errors in
+untouched files are not established as pre-existing without a baseline check.
 
 ### Where things live
 
@@ -209,7 +237,7 @@ Where a project under `~/code` has a Compose file, the bridge can inspect, resta
 | `codex.bin` / `extra_args` / `api_key` / `execute_sandbox` / `read_claude_md` | How Codex is invoked (see [Codex engine](#codex-engine)). `api_key` belongs in `config.local.json`. |
 | `codex.tiers.<tier>` / `codex.pricing.<model>` | Codex model per tier (same names as `models.tiers`); optional USD-per-million-token prices for cost estimates. |
 | `compose.protected[]` | Stacks the bridge refuses to restart/stop/up/redeploy. `redeploy_timeout_minutes`, `restart_timeout_seconds`, `logs_default_lines`. |
-| `projects.<name>` | Per-project overrides: `default_branch`, `job_timeout_minutes`, `max_cost_usd`, `allow_untracked`, `tier`, `engine`. |
+| `projects.<name>` | Per-project overrides: `default_branch` (discovery only), `allowed_base_branches` (execute restriction), `job_timeout_minutes`, `max_cost_usd`, `allow_untracked`, `tier`, `engine`. |
 
 Example override (from `config.json`):
 
@@ -241,7 +269,7 @@ Everything written to `transcript.log`, `stream.jsonl`, the server log, and ever
 
 ## Task guardrails
 
-Inside `~/code` only (checked on resolved paths) · branch-only, fresh branch off the default branch, never commits to it, never force-pushes · dirty tree refused before Claude starts · `plan` is the default mode · secrets scrubbed from everything readable · hard timeout + cost ceiling · one job per project, global cap · never merges.
+Inside `~/code` only (checked on resolved paths) · branch-only, fresh branch off the default branch, never commits to it, never force-pushes · dirty tree refused before Claude starts · `plan` is the default mode · secrets scrubbed from everything readable · hard timeout + cost ceiling · one job per project, global cap · ordinary jobs never merge; integration candidates follow the separate policy below.
 
 ## Claude Code version notes (keep this current)
 
@@ -277,3 +305,18 @@ deploy/             systemd unit
 scripts/            install.sh, token.sh, rotate-token.sh, register-openwebui.sh, mcp-call.sh
 test/               node:test unit tests
 ```
+
+## Guarded testing integrations
+
+See [INTEGRATIONS.md](INTEGRATIONS.md) for the plan → validate → draft PR workflow, per-project configuration, source provenance, container isolation and recovery. No integration tool updates an existing testing, default or protected branch.
+
+### Direct tool operation visibility
+
+`list_jobs` also returns an `operations` snapshot shared across MCP requests:
+active count, bounded active records (250), and recent completions (50). Each
+record has an operation ID, tool name, optional project, state and elapsed time.
+Prompts, arbitrary arguments and outputs are not retained. Handler success,
+MCP error results and thrown failures all settle the record. Status/log polling
+is excluded so observers do not count as work. Records are process-local and
+reset on bridge restart; they are not an audit history. The safe restart idle
+check includes direct operations once the running bridge supports the snapshot.

@@ -133,13 +133,39 @@
     "logs_default_lines": 200
   },
   "projects": {
-    "_comment": "Per-project overrides keyed by directory name. default_branch: use when it can't be inferred. allow_untracked: don't count untracked files as a dirty tree. tier: default model tier for this project (escalation can still raise it).",
+    "_comment": "Per-project overrides keyed by directory name. default_branch: discovery override. Execute tasks require an explicit base_branch. allowed_base_branches: optional exact branch allowlist for execute tasks. allow_untracked: don't count untracked files as a dirty tree. tier: default model tier for this project (escalation can still raise it).",
     "my-app": {
       "default_branch": "develop",
       "job_timeout_minutes": 40,
       "max_cost_usd": 10,
       "allow_untracked": true,
-      "tier": "complex"
+      "tier": "complex",
+      "integration": {
+        "_comment": "Opt in per repository after configuring an exact HTTPS GitHub origin, testing bases, and digest-pinned validation images with dependencies already installed. See INTEGRATIONS.md.",
+        "enabled": false,
+        "origin": "https://github.com/example/my-app.git",
+        "testing_branches": [
+          "testing/integration-test"
+        ],
+        "protected_branches": [
+          "release"
+        ],
+        "allow_default_baseline": false,
+        "source_pins": {},
+        "checks": [
+          {
+            "name": "tests",
+            "image": "registry.example.com/my-app-checks@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "command": [
+              "npm",
+              "test",
+              "--",
+              "--run"
+            ],
+            "timeout_seconds": 600
+          }
+        ]
+      }
     }
   },
   "goals": {

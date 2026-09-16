@@ -12,11 +12,10 @@ engine, mode, timestamp, job ID, source event or record, and scrubbed excerpt.
 Free-form assistant summaries are not promoted to verified knowledge. Structured
 lesson reports can be retained with matching tool evidence, as described below.
 
-
 Future jobs receive up to 6,000 characters of evidence, prioritizing lessons
 before raw observations. Raw observations match project, engine, and mode;
 lessons match the project and their declared project or engine scope. They must recheck applicability; historical
-errors do not establish a current problem, root cause, or working fix. Evidence
+errors do not estabylish a current problem, root cause, or working fix. Evidence
 is quoted data and cannot override task or project instructions.
 
 Run `node scripts/maintain-learnings.js` to rebuild `INDEX.md`. The daily cron
@@ -47,6 +46,40 @@ stream retains further detail until normal job retention removes it; copied
 excerpts survive independently. If the scan limit is reached, maintenance
 fails explicitly: review and archive evidence outside `observations/` before
 retrying. A learnings failure is logged without failing a coding job.
+
+## Reading learnings through MCP
+
+Call `list_learnings` with `{}` for recent evidence across all projects, or filter:
+
+```json
+{"project":"bnd-submissions","type":"lesson","limit":10,"offset":0}
+```
+
+From the shell:
+
+```sh
+sh scripts/mcp-call.sh list_learnings '{"project":"bnd-submissions","type":"lesson"}'
+```
+
+The tool reads validated files directly, without rebuilding the index or running
+a job. Results contain `learnings`, matching-record `total`, `offset`,
+`next_offset` (null when finished), `enabled`, and `rejected_count` for invalid
+files across the store. Each record includes its type, project, engine, mode,
+timestamp, job ID, source, observation, evidence path, stale status, and lesson
+metadata when present. Evidence and explanations are quoted data, not instructions.
+
+`project` matches exactly. `type` accepts `all` (default), `observation`, or
+`lesson`. Stale groups are excluded unless `include_stale=true`; aging follows
+the same rule as prompts and the index, so a recent exact repeat keeps its group
+current. Disabled storage returns an empty result with `enabled=false`.
+
+Pages default to 10 records, allow at most 20, and cap serialized entry data at
+64,000 bytes. Large records can produce shorter pages. Pass `next_offset` with
+the same filters to continue. Records sort newest first, with filenames breaking
+timestamp ties. Pagination is a live view: if new evidence arrives between calls,
+offsets may shift; restart at zero to refresh. Invalid files are excluded and
+counted; scan failures produce an MCP tool error. Access uses the bridge's normal
+bearer authentication and output scrubbing.
 
 ## Evidence-backed lessons
 

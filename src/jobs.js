@@ -7,7 +7,8 @@ import { randomBytes } from 'node:crypto';
 import { resolveProjectDir, BoundaryError } from './paths.js';
 import { projectOverrides } from './config.js';
 import { detectClaudeSetup } from './projects.js';
-import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
+import { git, run, currentBranchFast, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, worktreeAdd, worktreeDiscard, GitError } from './git.js';
+import { validateTaskBase } from './task-branches.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { Learnings } from './learnings.js';
 import { lessonInstructions } from './learning-lessons.js';
@@ -200,6 +201,7 @@ export class JobManager {
       return scrubDeep({
         job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode,
         elapsed_seconds: elapsedSeconds(j), activity: j.activity, branch: j.branch || undefined,
+        base_branch: j.base_branch || undefined,
         model: j.model || j.model_selected || undefined, cost_usd: j.cost_usd ?? undefined,
         queue_position: j.state === 'queued' ? this.queuePosition(j.id) : undefined,
         compose_steps: j.compose?.steps?.length ? j.compose.steps.map(s => `${s.name}=${s.state}`).join(', ') : undefined,
@@ -211,8 +213,9 @@ export class JobManager {
       job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode, agent: j.agent || undefined,
       created_at: j.created_at, started_at: j.started_at || undefined, finished_at: j.finished_at || undefined,
       elapsed_seconds: elapsedSeconds(j), activity: j.activity,
+      checkout_status: j.checkout_status,
       base_branch: j.base_branch || undefined, branch: j.branch || undefined, original_branch: j.original_branch || undefined,
-      commits: j.commits ?? undefined, pushed: j.pushed ?? undefined, pr_url: j.pr_url || undefined,
+      commits: j.commits ?? undefined, pushed: j.pushed ?? undefined, pushed_sha: j.pushed_sha || undefined, pr_url: j.pr_url || undefined,
       session_id: j.session_id || undefined,
       model: j.model || j.model_selected || undefined, model_selected: j.model_selected || undefined, tier: j.tier || undefined, model_reason: j.model_reason || undefined,
       engine_reason: j.engine_reason || undefined, sandbox: j.sandbox || undefined,
@@ -347,7 +350,7 @@ export class JobManager {
     if (agent && !setup.agents.some(a => a.name === agent)) {
       throw new Error(`agent "${agent}" not found in ${name}/.claude/agents (available: ${setup.agents.map(a => a.name).join(', ') || 'none'})`);
     }
-    if (base_branch && (!/^[A-Za-z0-9._\/-]{1,200}$/.test(base_branch) || base_branch.startsWith('-') || base_branch.includes('..'))) throw new Error('invalid base_branch');
+    base_branch = validateTaskBase({ mode, base_branch }, ov);
     if (complexity && !['low', 'normal', 'high'].includes(complexity)) throw new Error('complexity must be low, normal or high');
     if (effort && !EFFORT_LEVELS.includes(effort)) throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
     // The goal budget is checked BEFORE dispatch. Checking after would mean
@@ -371,14 +374,12 @@ export class JobManager {
     // dirty checkout never blocks a job — but uncommitted work is invisible
     // to it, which is worth saying out loud instead of silently ignoring.
     let dirtyNote = null;
+    let checkoutStatus = { branch: currentBranchFast(dir), dirty: null, status_entries: [], total_entries: null };
     try {
       const st = await workingTreeStatus(dir, { includeUntracked: !ov.allow_untracked, timeoutMs: 20_000 });
+      checkoutStatus = { ...checkoutStatus, dirty: st.dirty, status_entries: st.entries.slice(0, 50), total_entries: st.entries.length };
       if (st.dirty) dirtyNote = `${name}'s checkout has ${st.entries.length} uncommitted change(s); this job runs from committed state and cannot see them`;
     } catch { /* advisory only */ }
-    if (mode === 'execute' && !base_branch) {
-      const def = await defaultBranch(dir, ov.default_branch);
-      if (!def) throw new Error(`${name} has no inferable default branch (detached HEAD, no main/master?) — pass base_branch`);
-    }
 
     const limits = {
       timeout_minutes: timeout_minutes ?? ov.job_timeout_minutes ?? this.cfg.limits.job_timeout_minutes,
@@ -405,6 +406,7 @@ export class JobManager {
       retry_of: priorFailure?.id || null,
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: base_branch || null, branch: null, worktree: null, commits: null, pushed: null, pr_url: null,
+      checkout_status: scrubDeep(checkoutStatus),
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
       error: null, notes: [dirtyNote, costNote].filter(Boolean), pid: null, limits, setup: { claude_md: setup.claude_md, agents_md: setup.agents_md, preflight: setup.preflight, agents: setup.agents.map(a => a.name) },
     };
@@ -420,6 +422,7 @@ export class JobManager {
       this.notify?.post(`\u26a0 **${name}** now has ${clash.length + 1} jobs in flight \u2014 they cannot see each other's findings`);
     }
     return { job_id: id, goal_id: goal_id || undefined, state: job.state, project: name, mode, model: choice.model,
+      base_branch: job.base_branch, checkout_status: job.checkout_status,
       engine: eng.engine, engine_reason: eng.reason, sandbox: sandbox || undefined, cost_note: costNote || undefined,
       concurrent_on_project: clash.length
         ? { count: clash.length, jobs: clash.map(j => ({ job_id: j.id, state: j.state, summary: j.summary })),
@@ -629,6 +632,7 @@ export class JobManager {
   async runJob(job) {
     const repoDir = job.project_path;
     const ov = projectOverrides(this.cfg, job.project);
+    validateTaskBase(job, ov);
     const remote = await hasRemote(repoDir);
     const wt = path.join(this.cfg.data_dir, 'worktrees', job.id);
     fs.mkdirSync(path.dirname(wt), { recursive: true });
@@ -638,7 +642,7 @@ export class JobManager {
     // collide. Execute jobs branch off the (fetched) base; plan jobs get a
     // detached read-only snapshot.
     if (job.mode === 'execute') {
-      const base = job.base_branch || await defaultBranch(repoDir, ov.default_branch);
+      const base = job.base_branch;
       job.base_branch = base;
       let startPoint = base;
       if (remote) {
@@ -995,9 +999,11 @@ export class JobManager {
       if (remote) {
         job.activity = `pushing ${job.branch}`;
         this.save(job);
-        const r = await run('git', ['push', '--quiet', '-u', 'origin', `${job.branch}:${job.branch}`], { cwd: dir, timeoutMs: 180_000 });
+        const pushedSha = (await git(['rev-parse', '--verify', `refs/heads/${job.branch}`], { cwd: dir })).trim();
+        const r = await run('git', ['push', '--quiet', 'origin', `${pushedSha}:refs/heads/${job.branch}`], { cwd: dir, timeoutMs: 180_000 });
         if (r.code === 0) {
           job.pushed = true;
+          job.pushed_sha = pushedSha;
           this.appendTranscript(job, `pushed ${job.branch} to origin`);
           await this.openDraftPr(job);
         } else {

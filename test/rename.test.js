@@ -52,6 +52,8 @@ test('idle check blocks active jobs and fails when status is unavailable or malf
   for (const [body, code] of [
     ['echo \'{"jobs":[]}\'', 0],
     ['echo \'{"jobs":[{"job_id":"j_active"}]}\'', 2],
+    ['echo \'{"jobs":[],"active_integrations":1}\'', 2],
+    ['echo \'{"jobs":[],"active_integrations":0}\'', 0],
     ['exit 7', 1],
     ['echo \'{"unexpected":true}\'', 1],
     ['echo broken-json', 1],

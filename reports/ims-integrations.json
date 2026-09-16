@@ -1,0 +1,465 @@
+{
+  "scope": "Nine application repositories built by beyond-ims-deploy",
+  "testing_branch": "testing/passkeys",
+  "max_concurrent": 1,
+  "projects": [
+    {
+      "project": "bnd-accordance",
+      "origin": "https://github.com/Beyond-One-AU/accordance.git",
+      "sha": "90c2c5a798a563cf968fe7396577950562b5fa93",
+      "app_dir": "",
+      "validation_image": "sha256:41fd01172125da5778f0462135cecd6e9294831d188e4dd99477cc3102b61d42",
+      "base_digest": "node@sha256:ad1aedbcc1b0575074a91ac146d6956476c1f9985994810e4ee02efd932a68fd",
+      "image_id": "sha256:004bc3c48c89e51698ea180741d07f344755dd13f43f1d9a78134eb17c349bb1",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--runInBand"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      }
+    },
+    {
+      "project": "assets",
+      "origin": "https://github.com/Beyond-One-AU/assets.git",
+      "sha": "0a16581f15487015efb847b6734726161b177fce",
+      "app_dir": "",
+      "validation_image": "sha256:da1c17fca37aef609d7b66a11a8c4517d472164a669893b5b1cc031829cb7f28",
+      "base_digest": "node@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
+      "image_id": "sha256:647dc5e40a23d457401500dcd765db2cc99b756141402efbe7e956f46ef2e7bf",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--run",
+          "--maxWorkers=2"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      }
+    },
+    {
+      "project": "bnd-submissions",
+      "origin": "https://github.com/Beyond-One-AU/form-submissions.git",
+      "sha": "3f6773b8b07bf8439d8bc764806e2cbea0f3796c",
+      "app_dir": "",
+      "validation_image": "sha256:6bc3d7ffb902f37ca40199ab1af8bffdcaf79f5760451fc1f32b2d63d5acbd52",
+      "base_digest": "node@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293",
+      "image_id": "sha256:5498eb13d44f685ce943247f19eef621a5fb904016b7fcabcfa089d145c2e01f",
+      "reuse_dependencies": false,
+      "shared_commit": "9fb51c8be922f3a7f92e198781e876f14a9d5cbc",
+      "commands": {
+        "tests": [
+          "npm",
+          "run",
+          "test:run",
+          "--",
+          "--maxWorkers=2"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      },
+      "test_environment": "MONGODB_URI is unset for unit tests; synthetic localhost value is used only for builds"
+    },
+    {
+      "project": "bnd-playbook",
+      "origin": "https://github.com/ben-gt/ProcessFlowDesigner.git",
+      "sha": "f48a8822e598a38663cb600d64f095d38eb81bdf",
+      "app_dir": "",
+      "validation_image": "sha256:ad7821b6592d48447949d266c0bcbd93863a0c50ce763aea7a75bf702b4ab84a",
+      "base_digest": "node@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293",
+      "image_id": "sha256:455b90be004313b5f76a9bb32496d45d65d658bc6b40482cb826f412fc4598e5",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--run",
+          "--maxWorkers=2"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ]
+      }
+    },
+    {
+      "project": "bnd-interchange",
+      "origin": "https://github.com/Beyond-One-AU/synceriser.git",
+      "sha": "d8f47806f4782b432a78153ca85efaf4b9301a1a",
+      "app_dir": "",
+      "validation_image": "sha256:424ea006668c9ba0e57350a973318c44fff59b29a859f467e68553d6fb3883a1",
+      "base_digest": "node@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293",
+      "image_id": "sha256:2c4646fb185adc324acb909791e512d28afeca04c10188cae470326e4f6c949a",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--runInBand"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      }
+    },
+    {
+      "project": "bnd-flux",
+      "origin": "https://github.com/Beyond-One-AU/ticketeer.git",
+      "sha": "161eda9958dd96f42d003c3c46f7c035341ef0c8",
+      "app_dir": "",
+      "validation_image": "sha256:f4b06ef763274a8eb2fe76125f988d3a4bfb93e527050a3b5f27efed327a4d57",
+      "base_digest": "node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0",
+      "image_id": "sha256:11c804f1b4b67114c3f892b6b4237efe260a08be62603ec55d07eaa12015aa32",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--run",
+          "--maxWorkers=2"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      },
+      "additional_platform_package": "@rolldown/binding-linux-x64-gnu@1.0.0-rc.9"
+    },
+    {
+      "project": "bnd-performance",
+      "origin": "https://github.com/Beyond-One-AU/beyond-project-management.git",
+      "sha": "a8debdc37b26c135fa09d3b28290d106417eb3b1",
+      "app_dir": "",
+      "validation_image": "sha256:de8c636fc0bd3b3f21c1a01ec93b44951521549f211e690f468cdb451ad7c0ca",
+      "base_digest": "node@sha256:ad1aedbcc1b0575074a91ac146d6956476c1f9985994810e4ee02efd932a68fd",
+      "image_id": "sha256:456996a9c50e68f3f47239ef2664f26ea101e003e51696de933574f6e585afde",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--run",
+          "--maxWorkers=2"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      }
+    },
+    {
+      "project": "bnd-delegations",
+      "origin": "https://github.com/Beyond-One-AU/beyond-delegations.git",
+      "sha": "3d8e196f039539c7adb61363f4f066876f293509",
+      "app_dir": "",
+      "validation_image": "sha256:e2bcadf532877bae5b6c43919c0843f1d7784dd22509a1a99bf082d7eb29bc1b",
+      "base_digest": "node@sha256:ad1aedbcc1b0575074a91ac146d6956476c1f9985994810e4ee02efd932a68fd",
+      "image_id": "sha256:32613b76c8db6bad860aaaa937b9a385d4946f402ce08d2aff11a53e93089fc8",
+      "reuse_dependencies": true,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--run",
+          "--maxWorkers=2"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      }
+    },
+    {
+      "project": "bnd-passport",
+      "origin": "https://github.com/Beyond-One-AU/beyond-mobile.git",
+      "sha": "7d508a114dcee1f0e4f768ce2133376cdaab9438",
+      "app_dir": "BeyondMobile",
+      "validation_image": "sha256:f0d47360fa746b223f6611774ccc0432c0f36ce6e404f43dfd2b3267877e0799",
+      "base_digest": "node@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293",
+      "image_id": "sha256:0462e12ce758ce9f416e13939611b4c7514f4ae4866075d2c2f0d85fd56aec83",
+      "reuse_dependencies": false,
+      "shared_commit": null,
+      "commands": {
+        "tests": [
+          "npm",
+          "test",
+          "--",
+          "--runInBand"
+        ],
+        "types": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--incremental",
+          "false"
+        ],
+        "build": [
+          "npm",
+          "run",
+          "build:web"
+        ],
+        "lint": [
+          "npm",
+          "run",
+          "lint"
+        ]
+      }
+    }
+  ],
+  "verification": [
+    {
+      "project": "bnd-accordance",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "assets",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-submissions",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-playbook",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-interchange",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-flux",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-performance",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-delegations",
+      "status": "ready",
+      "exit_code": 0
+    },
+    {
+      "project": "bnd-passport",
+      "status": "ready",
+      "exit_code": 0
+    }
+  ],
+  "validation_limit": "Prerequisites and unit-test commands verified. Types, lint and builds are configured but their full application baselines were not run during setup.",
+  "baseline_unit_tests": [
+    {
+      "project": "bnd-accordance",
+      "status": "failing",
+      "exit_code": 1,
+      "summary": [
+        "Test Suites: 4 failed, 1 skipped, 28 passed, 32 of 33 total",
+        "Tests:       11 skipped, 415 passed, 426 total"
+      ]
+    },
+    {
+      "project": "assets",
+      "status": "passing",
+      "exit_code": 0,
+      "summary": [
+        "Test Files  5 passed (5)",
+        "Tests  79 passed (79)"
+      ]
+    },
+    {
+      "project": "bnd-submissions",
+      "status": "passing",
+      "exit_code": 0,
+      "summary": [
+        "Test Files  113 passed (113)",
+        "Tests  2378 passed (2378)"
+      ]
+    },
+    {
+      "project": "bnd-playbook",
+      "status": "passing",
+      "exit_code": 0,
+      "summary": [
+        "Test Files  82 passed (82)",
+        "Tests  903 passed (903)"
+      ]
+    },
+    {
+      "project": "bnd-interchange",
+      "status": "failing",
+      "exit_code": -1,
+      "summary": [
+        "8 suites failed, 95 passed; 20 tests failed, 1464 passed",
+        "Jest retained open handles after reporting results and hit the 600-second limit"
+      ]
+    },
+    {
+      "project": "bnd-flux",
+      "status": "passing",
+      "exit_code": 0,
+      "summary": [
+        "Test Files  27 passed (27)",
+        "Tests  232 passed (232)"
+      ]
+    },
+    {
+      "project": "bnd-performance",
+      "status": "passing",
+      "exit_code": 0,
+      "summary": [
+        "Test Files  7 passed (7)",
+        "Tests  101 passed (101)"
+      ]
+    },
+    {
+      "project": "bnd-delegations",
+      "status": "passing",
+      "exit_code": 0,
+      "summary": [
+        "Test Files  24 passed (24)",
+        "Tests  415 passed (415)"
+      ]
+    },
+    {
+      "project": "bnd-passport",
+      "status": "failing",
+      "exit_code": 1,
+      "summary": [
+        "Test Suites: 5 failed, 26 passed, 31 total",
+        "Tests:       6 failed, 271 passed, 277 total"
+      ]
+    }
+  ]
+}
