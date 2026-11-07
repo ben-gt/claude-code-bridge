@@ -21,6 +21,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   // Log every tool call (name, outcome, duration) — never the arguments, which may carry prompts/paths.
   const origRegister = server.registerTool.bind(server);
   server.registerTool = (name, config, handler) => origRegister(name, config, async (args, extra) => {
+    if (cfg.execution_branch && ['compose_redeploy','compose_restart','compose_stop','compose_up'].includes(name)) return fail(new Error('Demo deployment requires the shared build lock and current release configuration; use the demo deployment workflow.'));
     const t0 = Date.now();
     const r = await handler(args, extra);
     const msg = `tool ${name} ${r?.isError ? 'error' : 'ok'} ${Date.now() - t0}ms${r?.isError ? `: ${String(r.content?.[0]?.text || '').slice(0, 200)}` : ''}`;
@@ -63,6 +64,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       full_history: z.boolean().optional().describe('Clone full history (same as depth 0)'),
     },
   }, wrap(async args => {
+    if (cfg.execution_branch) { if (args.branch && args.branch !== cfg.execution_branch) throw new Error('Only the demo branch may be cloned'); args.branch = cfg.execution_branch; }
     const r = await cloneProject(cfg, args);
     projects.invalidate();
     if (r.status === 'cloned') await projects.scan().catch(() => {});
@@ -92,6 +94,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       timeout_minutes: z.number().positive().max(180).optional().describe('Override the hard timeout for this job'),
       model: z.string().optional().describe(`Override model selection: a tier name (${Object.keys(cfg.models?.tiers || {}).join(', ')}), a configured model id/alias, or any model string. Omit to let the bridge choose (default tier unless an escalation trigger fires). Always honoured, up or down.`),
       complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier'),
+      ticket_context: z.object({ticket_id:z.string(),text:z.string().max(200000),attachments:z.array(z.object({filename:z.string(),data_base64:z.string()})).max(20)}).optional().describe('Authorised ticket text and attachment bytes supplied by the Robut gateway; kept outside the repository.'),
       retry_of: z.string().optional().describe('job_id of a previous failed attempt; retries escalate automatically'),
     },
   }, wrap(async args => {

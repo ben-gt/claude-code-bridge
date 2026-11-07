@@ -61,7 +61,7 @@ async function main() {
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '4mb' }));
+  app.use(express.json({ limit: '24mb' }));
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true, version: VERSION, running_jobs: jobs.runningCount(), workspace_root: cfg.workspace_root });

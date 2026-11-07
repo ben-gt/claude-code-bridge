@@ -99,6 +99,8 @@ export async function cloneProject(cfg, { url, repo, host, name, branch, depth, 
     return { status: 'exists', name: clean, path: dest, message: `${clean} appeared during the clone; kept the existing directory` };
   }
   fs.renameSync(tmp, dest);
+  if (cfg.pre_push_hook) fs.symlinkSync(cfg.pre_push_hook, path.join(dest, '.git', 'hooks', 'pre-push'));
+
   try { fs.rmdirSync(tmpParent); } catch { /* not empty or gone */ }
   let headBranch = null;
   try { headBranch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: dest })).trim(); } catch { /* ignore */ }

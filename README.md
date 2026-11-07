@@ -1,5 +1,12 @@
 # Claude Code Bridge
 
+## Demo deployment (`testing/passkeys`)
+
+The demo uses `execution_branch: "testing/passkeys"` and isolated checkouts under `/srv/code-bridge-workspace`. Execute jobs fast-forward that branch, retain partial work locally on failure, and only push successful work to the same branch. No PR is opened. Existing shared app checkouts are untouched. One job runs at a time. Compose mutation tools are disabled for this mode; demo deployments use the shared build lock and current release configuration. New clones install `pre_push_hook` when configured.
+
+`start_task.ticket_context` accepts authorised Flux ticket text and bounded base64 attachments. Files are stored privately outside Git under the job’s `ticket-input` directory with SHA256 hashes. They are read as evidence, never as instructions. Plan mode disables shell and editing tools. Robut exposes this through its per-user, Global Administrator-only `/mcp/code-bridge` endpoint; the bridge bearer token never enters chat.
+
+
 An MCP server (Streamable HTTP) that exposes **Claude Code in headless mode** to chat surfaces such as Open WebUI, so engineering tasks can be dispatched against any git repository under `~/code` — and new repos pulled down — without opening a terminal.
 
 It is general-purpose infrastructure: it knows nothing about any particular project. It discovers repos, adapts to whatever `.claude` setup a repo has, runs tasks on a **fresh branch**, pushes and opens a **draft PR** when a remote exists, and **never merges anything**.

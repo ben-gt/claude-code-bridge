@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {validateTicketInput,saveTicketInput} from '../src/ticket-inputs.js';
+const input=(filename='proof.png')=>({ticket_id:'JERYYMKT',text:'Ticket evidence',attachments:[{filename,data_base64:Buffer.from([0,255,127]).toString('base64')}]});
+test('stores binary evidence outside git and returns hashes without bytes',t=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ticket-input-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));const m=saveTicketInput(dir,validateTicketInput(input()));assert.deepEqual(fs.readFileSync(path.join(m.directory,'1-proof.png')),Buffer.from([0,255,127]));assert.equal(m.attachments[0].bytes,undefined);assert.match(m.attachments[0].sha256,/^[a-f0-9]{64}$/);assert.equal(fs.statSync(path.join(m.directory,'ticket.txt')).mode&0o777,0o600);});
+test('rejects traversal and malformed bytes before creating a job',()=>{for(const name of ['../x','/etc/passwd','..','a\\b','a\0b'])assert.throws(()=>validateTicketInput(input(name)),/Unsafe/);const x=input();x.attachments[0].data_base64='!!!';assert.throws(()=>validateTicketInput(x),/Invalid/);});
+test('rejects oversized attachment and ticket payloads',()=>{const x=input();x.text='a'.repeat(200001);assert.throws(()=>validateTicketInput(x),/too large/);x.text='okay';x.attachments[0].data_base64=Buffer.alloc(10*1024*1024+1).toString('base64');assert.throws(()=>validateTicketInput(x),/limit|Invalid/);});
