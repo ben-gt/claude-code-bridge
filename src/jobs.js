@@ -569,6 +569,7 @@ export class JobManager {
       `You are running unattended through the Claude Code Bridge (job ${job.id}) in the repository "${job.project}" at ${job.project_path}. Nobody can answer questions, so make sensible decisions yourself and state your assumptions in your final message.`,
       `Stay inside this repository. Never print secrets, tokens, or the contents of .env files in your output.`,
       `Your final message is the only thing the requester reads, and the session ends with it. Do everything in the foreground: run tests and long commands directly (with a timeout), never in the background, and never schedule a wake-up or wait on a notification. If you use sub-agents, wait for their reports before writing the final message, and write that message once.`,
+      `Commit only what the task needs. Do not commit a lock file (package-lock.json and the like) unless you changed the dependencies in package.json, and never commit build output, caches or scratch files.`,
       `This job stops at $${job.limits.max_cost_usd} of usage or ${job.limits.timeout_minutes} minutes, whichever comes first, and a job stopped short of its final message is reported as failed. Scope the work to fit: read what the task needs rather than surveying the repository, and prefer targeted test runs over the whole suite when the suite is slow.`,
     ];
     if (job.continues) lines.push(`This session continues job ${job.continues}, which was stopped before it finished. The repository is as that job left it.`);
@@ -729,7 +730,17 @@ export class JobManager {
     if (this.cfg.execution_branch && currentBranchFast(dir) !== this.cfg.execution_branch) throw new Error('Refusing publication from an unexpected branch');
     try {
       // Commit anything the agent left uncommitted so nothing is lost.
-      const st = await workingTreeStatus(dir, { timeoutMs: 60_000 });
+      let st = await workingTreeStatus(dir, { timeoutMs: 60_000 });
+      if (st.dirty && !(abnormal && this.cfg.execution_branch)) {
+        // An install in the isolated checkout rewrites the lock file even when no dependency changed.
+        // That is noise from the sandbox, not work: put it back instead of publishing it.
+        const restored = await restoreLockChurn(dir, st.entries);
+        if (restored.length) {
+          job.notes.push(`left out lock-file changes with no dependency change: ${restored.join(', ')}`);
+          this.appendTranscript(job, `restored ${restored.join(', ')} (lock file changed, manifest did not)`);
+          st = await workingTreeStatus(dir, { timeoutMs: 60_000 });
+        }
+      }
       if (st.dirty && abnormal && this.cfg.execution_branch) {
         job.notes.push('Unfinished edits retained uncommitted; only existing commits are eligible for publication');
       } else if (st.dirty) {
@@ -1031,6 +1042,25 @@ function pickUsage(u) {
   };
 }
 /** This run's part of a session-wide figure. A session that did not carry its history forward reports the run alone. */
+const LOCK_FILES = { 'package-lock.json': 'package.json', 'npm-shrinkwrap.json': 'package.json', 'yarn.lock': 'package.json', 'pnpm-lock.yaml': 'package.json' };
+
+/**
+ * Restore modified lock files whose manifest beside them is unchanged, from `git status --porcelain` entries.
+ * Returns the paths restored. A lock file that changed together with its manifest is real work and is kept.
+ */
+export async function restoreLockChurn(dir, entries) {
+  const changed = new Map(entries.map(e => [e.slice(3).trim(), e.slice(0, 2)]));
+  const restored = [];
+  for (const [file, code] of changed) {
+    const manifest = LOCK_FILES[path.basename(file)];
+    if (!manifest || code.includes('?') || code.includes('A') || code.includes('D') || code.includes('R')) continue;
+    if (changed.has(path.join(path.dirname(file), manifest).replace(/^\.\//, ''))) continue;
+    await git(['checkout', 'HEAD', '--', file], { cwd: dir, timeoutMs: 60_000 });
+    restored.push(file);
+  }
+  return restored;
+}
+
 function ownShare(total, before) {
   const b = Number(before) || 0;
   return total >= b ? Math.round((total - b) * 10000) / 10000 : total;
