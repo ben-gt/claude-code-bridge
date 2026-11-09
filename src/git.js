@@ -162,6 +162,52 @@ export async function branchExists(dir, branch) {
   return r.code === 0;
 }
 
+/** Compare with the last fetched origin ref; discovery never fetches implicitly. */
+export async function branchSyncStatus(dir, branch = currentBranchFast(dir)) {
+  const tracking_ref = branch ? `origin/${branch}` : null;
+  const unknown = { tracking_ref, ahead: null, behind: null, diverged: null };
+  if (!branch) return unknown;
+  try {
+    const out = await git(['rev-list', '--left-right', '--count', `HEAD...refs/remotes/origin/${branch}`], { cwd: dir });
+    const [ahead, behind] = out.trim().split(/\s+/).map(Number);
+    return { tracking_ref, ahead, behind, diverged: ahead > 0 && behind > 0 };
+  } catch { return unknown; }
+}
+
+/** Preserve local history before reconciling the shared execution branch. */
+export async function reconcileBranch(dir, branch, rescueRef) {
+  for (const state of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD']) {
+    const statePath = (await git(['rev-parse', '--git-path', state], { cwd: dir })).trim();
+    if (fs.existsSync(path.resolve(dir, statePath))) {
+      throw new GitError(`Existing Git operation (${state}) in ${branch}; finish or abort it explicitly before retrying`, { code: 'checkout_operation_in_progress' });
+    }
+  }
+  try {
+    await git(['fetch', '--quiet', 'origin', `refs/heads/${branch}:refs/remotes/origin/${branch}`], { cwd: dir, timeoutMs: 120_000 });
+  } catch (e) {
+    throw new GitError(`Could not fetch origin/${branch}: ${e.message}`, { code: 'checkout_fetch_failed' });
+  }
+  const sync = await branchSyncStatus(dir, branch);
+  if (sync.ahead === null) throw new GitError(`Cannot compare HEAD with origin/${branch}`, { code: 'checkout_sync_failed' });
+  if (!sync.behind) return { ...sync, rescue_ref: null };
+  let rescue_ref = null;
+  if (sync.ahead) {
+    await git(['branch', rescueRef, 'HEAD'], { cwd: dir });
+    rescue_ref = rescueRef;
+  }
+  try {
+    await git(['rebase', '--rebase-merges', `refs/remotes/origin/${branch}`], { cwd: dir, timeoutMs: 120_000 });
+  } catch (e) {
+    const conflicts = await run('git', ['diff', '--name-only', '--diff-filter=U'], { cwd: dir });
+    const aborted = await run('git', ['rebase', '--abort'], { cwd: dir });
+    const code = conflicts.stdout.trim() ? 'checkout_rebase_conflict' : 'checkout_sync_failed';
+    const error = new GitError(`${branch} was ahead ${sync.ahead}, behind ${sync.behind}. Rebase failed${rescue_ref ? `; original commits preserved at ${rescue_ref}` : ''}. ${aborted.code === 0 ? 'Rebase aborted; original checkout restored.' : 'Inspect git status before retrying.'} Resolve the checkout against origin/${branch} and retry.${conflicts.stdout.trim() ? ` Conflicts: ${conflicts.stdout.trim().split('\n').join(', ')}.` : ''} ${e.message}`, { code });
+    error.rescue_ref = rescue_ref;
+    throw error;
+  }
+  return { ...sync, rescue_ref };
+}
+
 /** Parse host/owner/repo out of an https or ssh remote URL. */
 export function parseRemote(url) {
   if (!url) return null;

@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { resolveProjectDir, BoundaryError } from './paths.js';
 import { projectOverrides } from './config.js';
 import { detectClaudeSetup } from './projects.js';
-import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, currentBranchFast, GitError } from './git.js';
+import { git, run, defaultBranch, workingTreeStatus, hasRemote, branchExists, remoteUrlFast, parseRemote, currentBranchFast, GitError, reconcileBranch, branchSyncStatus } from './git.js';
 import { scrub, scrubDeep } from './scrub.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
 import { selectModel } from './models.js';
@@ -118,7 +118,7 @@ export class JobManager {
       .map(j => ({
         job_id: j.id, kind: j.kind || 'claude', state: j.state, project: j.project, mode: j.mode, created_at: j.created_at,
         elapsed_seconds: elapsedSeconds(j), summary: j.summary, branch: j.branch || undefined, pr_url: j.pr_url || undefined,
-        cost_usd: j.cost_usd ?? undefined, model: j.model || undefined, error: j.error || undefined,
+        cost_usd: j.cost_usd ?? undefined, model: j.model || undefined, error: j.error || undefined, error_code: j.error_code || undefined,
       }));
   }
 
@@ -167,6 +167,7 @@ export class JobManager {
       result: j.result_text ? trunc(j.result_text, 4000) : undefined,
       plan_file: j.plan_file || undefined,
       error: j.error || undefined, notes: j.notes?.length ? j.notes : undefined,
+      error_code: j.error_code || undefined, publication_error: j.publication_error || undefined, rescue_ref: j.rescue_ref || undefined,
       queue_position: j.state === 'queued' ? this.queuePosition(j.id) : undefined,
     });
   }
@@ -304,7 +305,8 @@ export class JobManager {
       const runner = job.kind === 'compose_redeploy' ? this.runComposeJob(job) : this.runJob(job);
       runner.catch(e => {
         this.log.error(`job ${job.id} crashed: ${e.stack || e.message}`);
-        this.finish(job, 'failed', `internal error: ${scrub(e.message)}`);
+        job.error_code = typeof e.code === 'string' ? e.code : 'internal_error';
+        this.finish(job, 'failed', `${job.error_code}: ${scrub(e.message)}`);
       });
     }
   }
@@ -336,8 +338,17 @@ export class JobManager {
       if (currentBranchFast(dir) !== branch) return this.finish(job, 'failed', `Checkout must be on ${branch}`);
       job.original_branch = branch; job.base_branch = branch; job.branch = branch;
       if (remote) {
-        await git(['fetch', '--quiet', 'origin', branch], {cwd:dir, timeoutMs:120000});
-        await git(['merge', '--ff-only', `origin/${branch}`], {cwd:dir});
+        job.activity = `reconciling origin/${branch}`;
+        this.save(job);
+        try {
+          const sync = await reconcileBranch(dir, branch, `rescue/bridge-${job.id}`);
+          job.rescue_ref = sync.rescue_ref;
+          this.appendTranscript(job, `checkout reconciled: ahead=${sync.ahead}, behind=${sync.behind}${sync.rescue_ref ? `; rescue=${sync.rescue_ref}` : ''}`);
+        } catch (e) {
+          job.rescue_ref = e.rescue_ref || null;
+          job.error_code = typeof e.code === 'string' ? e.code : 'checkout_sync_failed';
+          return this.finish(job, 'failed', `${job.error_code}: ${job.project} (${branch}): ${e.message}`);
+        }
       }
       job.start_sha = (await git(['rev-parse','HEAD'], {cwd:dir})).trim();
     } else if (job.mode === 'execute') {
@@ -376,7 +387,8 @@ export class JobManager {
 
     if (exit.timedOut) {
       await this.postProcess(job, { remote, abnormal: true });
-      return this.finish(job, 'failed', `timed out after ${job.limits.timeout_minutes} minutes (hard limit); partial work kept on ${job.branch || 'no branch'}`);
+      job.error_code = 'job_timeout';
+      return this.finish(job, 'failed', `timed out after ${job.limits.timeout_minutes} minutes (hard limit); ${job.pushed ? 'existing commits pushed; unfinished edits retained locally' : 'work retained locally'} on ${job.branch || 'no branch'}${job.publication_error ? `; ${job.publication_error}` : ''}`);
     }
     if (exit.code !== 0 && !job._resultSeen) {
       await this.postProcess(job, { remote, abnormal: true });
@@ -553,7 +565,9 @@ export class JobManager {
     try {
       // Commit anything the agent left uncommitted so nothing is lost.
       const st = await workingTreeStatus(dir, { timeoutMs: 60_000 });
-      if (st.dirty) {
+      if (st.dirty && abnormal && this.cfg.execution_branch) {
+        job.notes.push('Unfinished edits retained uncommitted; only existing commits are eligible for publication');
+      } else if (st.dirty) {
         job.activity = 'committing leftover changes';
         await git(['add', '-A'], { cwd: dir, timeoutMs: 60_000 });
         await git(['-c', `user.name=${authorName(this.cfg)}`, '-c', `user.email=${authorEmail(this.cfg)}`, 'commit', '--quiet', '-m', `chore(bridge): ${abnormal ? 'partial work' : 'leftover changes'} from job ${job.id}\n\n${trunc(job.summary, 200)}`], { cwd: dir, timeoutMs: 60_000 });
@@ -567,8 +581,12 @@ export class JobManager {
       const count = Number((await git(['rev-list', '--count', `${baseSha}..HEAD`], { cwd: dir })).trim());
       job.commits = count;
 
-      if (count === 0 && this.cfg.execution_branch) return;
-      if (count === 0) {
+      if (this.cfg.execution_branch) {
+        // Older jobs may have stranded commits before this job's start_sha.
+        const sync = remote ? await branchSyncStatus(dir, job.branch) : null;
+        if (remote && sync.ahead === null) throw new GitError('Cannot determine unpublished commits; work retained locally', { code: 'publication_failed' });
+        if (remote && sync.ahead === 0) return;
+      } else if (count === 0) {
         job.notes.push('no commits were produced; branch removed');
         this.appendTranscript(job, 'no commits on branch; removing it');
         await this.restoreOriginal(job);
@@ -577,7 +595,6 @@ export class JobManager {
         return;
       }
 
-      if (this.cfg.execution_branch && abnormal) { job.notes.push('Partial work retained locally; not pushed'); return; }
       if (remote) {
         job.activity = `pushing ${job.branch}`;
         this.save(job);
@@ -588,7 +605,7 @@ export class JobManager {
           if (!this.cfg.execution_branch) await this.openDraftPr(job);
         } else {
           job.pushed = false;
-          if (this.cfg.execution_branch) throw new Error('Push failed; commits retained locally. Refresh and reconcile the demo branch.');
+          if (this.cfg.execution_branch) throw new GitError(`Push failed; commits retained locally. Refresh and reconcile ${job.project} (${job.branch}). ${trunc(r.stderr.trim(), 500)}`, { code: 'publication_failed' });
           job.notes.push(`push failed: ${trunc(r.stderr.trim(), 300)} — branch exists locally`);
           this.appendTranscript(job, `push failed: ${r.stderr.trim()}`);
         }
@@ -598,6 +615,13 @@ export class JobManager {
       }
       await this.restoreOriginal(job);
     } catch (e) {
+      if (abnormal && this.cfg.execution_branch) {
+        job.pushed = false;
+        job.publication_error = scrub(`${e.code || 'publication_failed'}: ${e.message}`);
+        job.notes.push(job.publication_error);
+        this.appendTranscript(job, job.publication_error);
+        return;
+      }
       if (this.cfg.execution_branch) throw e;
       job.notes.push(`post-processing error: ${scrub(e.message)}`);
       this.appendTranscript(job, `post-processing error: ${e.message}`);

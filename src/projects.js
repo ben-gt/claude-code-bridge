@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { realWorkspaceRoot, isInside } from './paths.js';
-import { isGitRepo, currentBranchFast, remoteUrlFast, defaultBranch, workingTreeStatus } from './git.js';
+import { isGitRepo, currentBranchFast, remoteUrlFast, defaultBranch, workingTreeStatus, branchSyncStatus } from './git.js';
 import { projectOverrides } from './config.js';
 import { findComposeFiles } from './compose.js';
 
@@ -106,6 +106,7 @@ export async function describeProject(cfg, name, dir, { withStatus = true } = {}
     default_branch: def,
     remote,
     dirty,
+    ...await branchSyncStatus(dir),
     ...setup,
     compose: findComposeFiles(dir),
     overrides: Object.keys(ov).length ? ov : undefined,

@@ -30,7 +30,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   });
   server.registerTool('list_projects', {
     title: 'List projects',
-    description: `Rescan the workspace root (${cfg.workspace_root}) and list every git repository in it: name, current branch, default branch, remote (credentials stripped), whether the working tree is dirty, whether a .claude setup exists (CLAUDE.md / .claude/preflight.md / .claude/agents) and which agents it exposes. Results are cached and refreshed on every call.`,
+    description: `Rescan the workspace root (${cfg.workspace_root}) and list every git repository in it: name, current branch, default branch, remote (credentials stripped), dirty flag, ahead/behind counts and diverged flag against the last fetched origin ref (null if unknown; this listing does not fetch), whether a .claude setup exists (CLAUDE.md / .claude/preflight.md / .claude/agents) and which agents it exposes. Results are cached and refreshed on every call.`,
     inputSchema: {
       filter: z.string().optional().describe('Case-insensitive substring to match against project names'),
       verbose: z.boolean().optional().describe('Full detail per project (paths, agent descriptions, compose file metadata). Default is a compact listing.'),
@@ -42,6 +42,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       // Compact by default: this result lands in the chat context verbatim and is often called more than once.
       out = out.map(p => ({
         name: p.name, current_branch: p.current_branch, default_branch: p.default_branch, remote: p.remote, dirty: p.dirty,
+        tracking_ref: p.tracking_ref, ahead: p.ahead, behind: p.behind, diverged: p.diverged,
         has_claude_setup: p.has_claude_setup, claude_md: p.claude_md || undefined, preflight: p.preflight || undefined,
         agents: p.agents.length ? p.agents.map(a => a.name) : undefined,
         compose: p.compose.length ? p.compose.map(c => c.file) : undefined,
