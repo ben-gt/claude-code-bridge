@@ -163,6 +163,17 @@ test('improvements are kept as commits, everything else is reverted, and the che
   assert.equal(status.next_step, undefined);
 });
 
+test('a kept commit has a short subject and the whole description in its body', async t => {
+  const f = fixture(t);
+  const long = 'Replaced the linear scan with a `binary search` over the sorted array, cutting comparisons per target from O(n) to about log2(n).';
+  const { j } = await experiment(f, spec({ max_iterations: 1 }), [() => { f.write('src/value.txt', '8\n'); return `CHANGE: ${long}`; }]);
+  const subject = f.git('log', '-1', '--format=%s', j.branch);
+  assert.ok(subject.length <= 84, subject);
+  assert.match(subject, /^experiment: Replaced the linear scan with a binary search over the sorted array.*…$/);
+  assert.ok(f.git('log', '-1', '--format=%b', j.branch).includes(long));
+  assert.equal(j.experiment.attempts[0].description, long);
+});
+
 test('a change outside the editable paths is discarded whole, however good the number', async t => {
   const f = fixture(t);
   const { j } = await experiment(f, spec({ measure_command: 'sh bench.sh', max_iterations: 2, patience: 2 }), [
@@ -231,7 +242,8 @@ test('it stops when the agent has nothing left to try, or after too many attempt
   ]);
   assert.equal(done.j.state, 'completed');
   assert.deepEqual(done.j.experiment.attempts.map(a => a.status), ['keep', 'done']);
-  assert.match(done.j.experiment.stop_reason, /no further change worth measuring \(the remaining cost is outside the editable paths\)/);
+  assert.match(done.j.experiment.stop_reason, /no further change worth measuring$/);
+  assert.equal(done.j.experiment.attempts[1].description, 'the remaining cost is outside the editable paths');
 
   const g = fixture(t);
   const stuck = await experiment(g, spec({ max_iterations: 6, patience: 2 }), [

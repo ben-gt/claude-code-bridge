@@ -530,7 +530,8 @@ async function experiment(m, job) {
       await cleanTree(dir, head);
     } else {
       // Commit first, so anything the check or the measurement writes can be cleaned away without touching the candidate.
-      const c = await run('git', [...identity, 'commit', '--quiet', '-m', `experiment: ${a.description || `attempt ${n}`}\n\nAttempt ${n} of bridge experiment ${job.id} (${x.metric_name}, ${x.direction}).`], { cwd: dir, timeoutMs: 120_000 });
+      const subject = `experiment: ${trunc(a.description.replace(/`/g, '') || `attempt ${n}`, 72)}`;
+      const c = await run('git', [...identity, 'commit', '--quiet', '-m', `${subject}\n\n${a.description ? `${a.description}\n\n` : ''}Attempt ${n} of bridge experiment ${job.id} (${x.metric_name}, ${x.direction}).`], { cwd: dir, timeoutMs: 120_000 });
       if (c.code !== 0) {
         a.status = 'check_failed'; a.detail = `the commit was rejected: ${tail(c, 300)}`;
         await cleanTree(dir, head);
@@ -576,7 +577,7 @@ async function experiment(m, job) {
 
     sinceKeep = a.status === 'keep' ? 0 : sinceKeep + 1;
     if (a.status === 'error') x.stop_reason = `the agent session failed (${a.detail})`;
-    else if (a.status === 'done') x.stop_reason = `the agent had no further change worth measuring${a.description ? ` (${a.description})` : ''}`;
+    else if (a.status === 'done') x.stop_reason = 'the agent had no further change worth measuring';
     else if (a.status === 'keep' && targetReached(x.best, x.target, x.direction)) x.stop_reason = `the target of ${fmt(x.target)} was reached`;
     else if (sinceKeep >= x.patience) x.stop_reason = `no improvement in ${x.patience} consecutive attempt${x.patience === 1 ? '' : 's'}`;
     else if (n === x.max_iterations) x.stop_reason = `all ${x.max_iterations} attempts were used`;
