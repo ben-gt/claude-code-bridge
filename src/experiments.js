@@ -450,7 +450,9 @@ async function experiment(m, job) {
     const r = await runShell(m, job, x.setup_command, { timeoutMs: within(o.setup_timeout_seconds * 1000) });
     if (halted()) return halt();
     if (r.timedOut || r.code !== 0) return fail('setup_failed', `the setup command ${r.timedOut ? `did not finish within ${o.setup_timeout_seconds}s` : `exited with code ${r.code}`}: ${tail(r)}`);
-    const st = await workingTreeStatus(dir);
+    let st = await workingTreeStatus(dir);
+    // An install rewrites the lock file even when no dependency changed; that is the sandbox, not a change.
+    if (st.dirty && (await m.restoreLockChurn(dir, st.entries)).length) st = await workingTreeStatus(dir);
     if (st.dirty) return fail('setup_failed', `the setup command left uncommitted changes (${st.entries.slice(0, 5).join(', ')}); it may only produce files that git ignores`);
   }
   if (x.check_command) {
@@ -509,6 +511,9 @@ async function experiment(m, job) {
       if (job.original_branch) await run('git', ['branch', '--force', job.original_branch, job.original_sha], { cwd: dir, timeoutMs: 60_000 });
     }
     await run('git', ['reset', '--soft', head], { cwd: dir, timeoutMs: 60_000 });
+    // Lock-file churn from an install during the turn is not part of the change, in scope or out of it.
+    const left = await workingTreeStatus(dir);
+    if (left.dirty) await m.restoreLockChurn(dir, left.entries);
     await run('git', ['add', '-A'], { cwd: dir, timeoutMs: 60_000 });
     const changed = (await git(['diff', '--cached', '--name-only', '--no-renames', head], { cwd: dir, timeoutMs: 60_000 })).split('\n').filter(Boolean);
     const outside = changed.filter(f => !inScope(f, x.editable));

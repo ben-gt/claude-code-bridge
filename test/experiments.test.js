@@ -210,6 +210,19 @@ test('what the agent does with git does not change what is measured or what is p
   assert.equal(f.git('show', `${j.branch}:src/value.txt`), '6');
 });
 
+test('a lock file an install rewrote is left out of the attempt instead of sinking it', async t => {
+  const f = fixture(t);
+  f.write('package.json', '{"name":"app"}\n'); f.write('package-lock.json', '{"lockfileVersion":3}\n');
+  f.git('add', '.'); f.git('commit', '-qm', 'manifest');
+  const { j } = await experiment(f, spec({ max_iterations: 1, setup_command: 'echo "{}" > package-lock.json' }), [
+    () => { f.write('package-lock.json', '{"churn":true}\n'); f.write('src/value.txt', '8\n'); return 'CHANGE: 8, after an install'; },
+  ]);
+  assert.equal(j.state, 'completed');
+  assert.deepEqual(j.experiment.attempts.map(a => a.status), ['keep']);
+  assert.equal(f.git('show', '--name-only', '--format=', j.branch), 'src/value.txt');
+  assert.equal(f.read('package-lock.json'), '{"lockfileVersion":3}\n');
+});
+
 test('it stops when the agent has nothing left to try, or after too many attempts without a gain', async t => {
   const f = fixture(t);
   const done = await experiment(f, spec({ max_iterations: 6 }), [

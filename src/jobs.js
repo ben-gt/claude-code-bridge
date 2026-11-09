@@ -452,6 +452,9 @@ export class JobManager {
 
   runExperimentJob(job) { return runExperiment(this, job); }
 
+  /** Put back lock files an install rewrote without a dependency change (see restoreLockChurn). */
+  restoreLockChurn(dir, entries) { return restoreLockChurn(dir, entries); }
+
   applyExperiment(args) { return applyExperiment(this, args); }
 
   /** Start queued jobs while capacity allows. */
