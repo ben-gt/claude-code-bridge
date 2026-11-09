@@ -78,6 +78,12 @@ test('the plan is the substantive result, not a closing "delivered above" recap 
   });
   assert.equal(j.state, 'completed');
   assert.ok(fs.readFileSync(j.plan_file, 'utf8').startsWith('# Implementation plan'));
+  // The status a chat reads carries the whole plan, not the first 4,000 characters of it.
+  assert.equal(f.m.status(j.id).result, j.result_text);
+  assert.equal(f.m.status(j.id).result_truncated, undefined);
+  j.result_text = 'x'.repeat(20500);
+  assert.equal(f.m.status(j.id).result.length, 20000);
+  assert.match(f.m.status(j.id).result_truncated, /20000 of 20500/);
 });
 
 test('finished work is published when the session only overran the time limit (436I5C5G)', async t => {

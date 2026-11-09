@@ -16,6 +16,7 @@ import { resolveComposeTarget, composeConfig, composeStatus, composeStream, vali
 
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
 const ACTIVE = new Set(['queued', 'running']);
+const RESULT_MAX_CHARS = 20000;
 
 function newJobId() {
   return `j_${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
@@ -164,7 +165,9 @@ export class JobManager {
       compose: j.compose || undefined,
       cost_usd: j.cost_usd ?? undefined, usage: j.usage || undefined, num_turns: j.num_turns ?? undefined,
       limits: j.limits,
-      result: j.result_text ? trunc(j.result_text, 4000) : undefined,
+      // Whole plans run to 8–12k characters; cutting them at 4k handed the chat half a plan and a path it cannot read.
+      result: j.result_text ? trunc(j.result_text, RESULT_MAX_CHARS) : undefined,
+      result_truncated: j.result_text && j.result_text.length > RESULT_MAX_CHARS ? `showing ${RESULT_MAX_CHARS} of ${j.result_text.length} characters` : undefined,
       plan_file: j.plan_file || undefined,
       error: j.error || undefined, notes: j.notes?.length ? j.notes : undefined,
       error_code: j.error_code || undefined, publication_error: j.publication_error || undefined, rescue_ref: j.rescue_ref || undefined,
