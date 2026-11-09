@@ -13,6 +13,7 @@ import { scrub, scrubDeep } from './scrub.js';
 import { apiFetch, hostConfigFor } from './credentials.js';
 import { selectModel } from './models.js';
 import { resolveComposeTarget, composeConfig, composeStatus, composeStream, validateServices, killGroup as composeKill, isProtected } from './compose.js';
+import { normaliseSpec, runExperiment, applyExperiment, restoreCheckout, experimentOptions, experimentView, report as experimentReport } from './experiments.js';
 
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
 const ACTIVE = new Set(['queued', 'running']);
@@ -82,6 +83,8 @@ export class JobManager {
           atomicWrite(this.recordFile(id), JSON.stringify(job, null, 2));
           interrupted++;
         }
+        // Idempotent: it only acts while the checkout is still on the experiment's own branch.
+        if (job.kind === 'experiment' && job.state === 'interrupted' && job.branch) this.recoverExperiment(job);
         this.jobs.set(id, job);
         loaded++;
       } catch { /* skip corrupt */ }
@@ -97,6 +100,27 @@ export class JobManager {
       try { fs.rmSync(this.jobDir(j.id), { recursive: true, force: true }); } catch { /* ignore */ }
       this.jobs.delete(j.id);
     }
+  }
+
+  /**
+   * An experiment interrupted mid-attempt leaves the checkout on its own branch with a half-made
+   * candidate in it. Nothing there is anybody's work, and the next job needs the checkout back.
+   */
+  recoverExperiment(job) {
+    job.notes = job.notes || [];
+    restoreCheckout(this, job).then(() => {
+      const x = job.experiment;
+      if (!x || x.stop_reason) return; // already recovered on an earlier start
+      x.stop_reason = 'the server restarted while it was running; the attempt in progress was dropped';
+      job.commits = x.kept;
+      if (typeof x.baseline === 'number') job.result_text = experimentReport(job, this.cfg);
+      this.save(job, { immediate: true });
+    }).catch(e => this.log.error(`experiment ${job.id} recovery: ${e.message}`));
+  }
+
+  /** `git -c` arguments that author a commit the bridge makes itself. */
+  commitIdentity() {
+    return ['-c', `user.name=${authorName(this.cfg)}`, '-c', `user.email=${authorEmail(this.cfg)}`];
   }
 
   appendTranscript(job, line) {
@@ -151,6 +175,7 @@ export class JobManager {
         model: j.model || j.model_selected || undefined, cost_usd: j.cost_usd ?? undefined,
         queue_position: j.state === 'queued' ? this.queuePosition(j.id) : undefined,
         compose_steps: j.compose?.steps?.length ? j.compose.steps.map(s => `${s.name}=${s.state}`).join(', ') : undefined,
+        experiment: experimentView(j.experiment, { lean: true }),
         hint: 'still running — call again with wait_seconds (default 20) to long-poll instead of spinning; get_task_log for detail',
       });
     }
@@ -163,6 +188,7 @@ export class JobManager {
       session_id: j.session_id || undefined,
       model: j.model || j.model_selected || undefined, model_selected: j.model_selected || undefined, tier: j.tier || undefined, model_reason: j.model_reason || undefined,
       compose: j.compose || undefined,
+      experiment: experimentView(j.experiment),
       cost_usd: j.cost_usd ?? undefined, usage: j.usage || undefined, num_turns: j.num_turns ?? undefined,
       limits: j.limits,
       // Whole plans run to 8–12k characters; cutting them at 4k handed the chat half a plan and a path it cannot read.
@@ -214,11 +240,13 @@ export class JobManager {
   }
 
   queuePosition(id) {
-    const q = [...this.jobs.values()].filter(j => j.state === 'queued').sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const lane = laneOf(this.jobs.get(id) || {});
+    const q = [...this.jobs.values()].filter(j => j.state === 'queued' && laneOf(j) === lane).sort((a, b) => a.created_at.localeCompare(b.created_at));
     return q.findIndex(j => j.id === id) + 1;
   }
 
-  runningCount() { return [...this.jobs.values()].filter(j => j.state === 'running').length; }
+  /** Running jobs, optionally in one lane: experiments run for hours and must not hold up ordinary jobs. */
+  runningCount(lane) { return [...this.jobs.values()].filter(j => j.state === 'running' && (!lane || laneOf(j) === lane)).length; }
 
   activeForProject(project) {
     return [...this.jobs.values()].find(j => j.project === project && ACTIVE.has(j.state));
@@ -229,7 +257,7 @@ export class JobManager {
     const lock = this.composeLocks.get(project);
     if (lock) throw new Error(`refused: ${project} has a compose operation in progress (${lock}); ${what} would fight it for the working tree`);
     const busy = this.activeForProject(project);
-    if (busy) throw new Error(`refused: ${project} already has an active ${busy.kind === 'compose_redeploy' ? 'compose redeploy' : 'Claude Code'} job (${busy.id}, ${busy.state}); one operation per project`);
+    if (busy) throw new Error(`refused: ${project} already has an active ${busy.kind === 'compose_redeploy' ? 'compose redeploy' : busy.kind === 'experiment' ? 'experiment' : 'Claude Code'} job (${busy.id}, ${busy.state}); one operation per project`);
   }
 
   /** Hold a short lock while a synchronous compose op runs. */
@@ -373,17 +401,71 @@ export class JobManager {
     return { job_id: id, continues: prev.id, state: job.state, project: prev.project, mode: prev.mode, model, queue_position: this.queuePosition(id), limits, spent_so_far_usd: this.chainCost(prev) };
   }
 
+  /**
+   * Queue an experiment: a loop in which Claude proposes one change at a time and the bridge measures
+   * each, keeping only what improves the metric. See experiments.js.
+   */
+  async startExperiment(args) {
+    const { project, base_branch, max_cost_usd, timeout_minutes, model } = args;
+    const requiredBranch = this.cfg.execution_branch;
+    if (requiredBranch && base_branch && base_branch !== requiredBranch) throw new Error(`This demo only permits ${requiredBranch}`);
+    if (base_branch && (!/^[A-Za-z0-9._\/-]{1,200}$/.test(base_branch) || base_branch.startsWith('-') || base_branch.includes('..'))) throw new Error('invalid base_branch');
+    const dir = resolveProjectDir(this.cfg, project);
+    const name = path.relative(fs.realpathSync(this.cfg.workspace_root), dir);
+    const ov = projectOverrides(this.cfg, name);
+    const spec = normaliseSpec(this.cfg, args, dir);
+    const o = experimentOptions(this.cfg);
+    if (timeout_minutes !== undefined && (typeof timeout_minutes !== 'number' || timeout_minutes <= 0 || timeout_minutes > o.max_timeout_minutes)) throw new Error(`timeout_minutes must be between 1 and ${o.max_timeout_minutes}`);
+    this.assertProjectFree(name, 'an experiment');
+    const setup = detectClaudeSetup(dir);
+    const choice = selectModel(this.cfg, { projectOverrides: ov, prompt: spec.objective, mode: 'execute', setup, explicitModel: model });
+    const st = await workingTreeStatus(dir, { includeUntracked: !ov.allow_untracked, timeoutMs: 20_000 });
+    if (st.dirty) {
+      const e = new Error(`refused: ${name} has uncommitted changes (${st.entries.length} entr${st.entries.length === 1 ? 'y' : 'ies'}). Commit or stash them first.\n` + st.entries.slice(0, 20).join('\n'));
+      e.code = 'DIRTY_TREE';
+      throw e;
+    }
+    const limits = {
+      timeout_minutes: timeout_minutes ?? o.timeout_minutes,
+      max_cost_usd: max_cost_usd ?? o.max_cost_usd ?? ov.max_cost_usd ?? choice.max_cost_usd ?? this.cfg.limits.max_cost_usd,
+    };
+    const id = newJobId();
+    const job = {
+      id, kind: 'experiment', project: name, project_path: dir, mode: 'experiment', agent: null, prompt: scrub(spec.objective),
+      summary: trunc(`experiment: ${spec.objective.replace(/\s+/g, ' ').trim()}`, 100),
+      model_selected: choice.model, tier: choice.tier, model_reason: choice.reason, retry_of: null,
+      state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
+      base_branch: base_branch || requiredBranch || null, branch: null, original_branch: null, commits: null, pushed: null, pr_url: null,
+      session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
+      error: null, notes: [], pid: null, limits, experiment: scrubDeep(spec),
+    };
+    fs.mkdirSync(this.jobDir(id), { recursive: true });
+    this.jobs.set(id, job);
+    this.save(job, { immediate: true });
+    this.appendTranscript(job, `job ${id} queued: experiment on ${name}, ${spec.metric_name} (${spec.direction}), up to ${spec.max_iterations} attempts, model=${choice.model}`);
+    setImmediate(() => this.pump());
+    return {
+      job_id: id, state: job.state, kind: 'experiment', project: name, model: choice.model, tier: choice.tier, queue_position: this.queuePosition(id), limits,
+      experiment: { metric_name: spec.metric_name, direction: spec.direction, max_iterations: spec.max_iterations, patience: spec.patience, editable: spec.editable },
+    };
+  }
+
+  runExperimentJob(job) { return runExperiment(this, job); }
+
+  applyExperiment(args) { return applyExperiment(this, args); }
+
   /** Start queued jobs while capacity allows. */
   pump() {
-    const cap = this.cfg.limits.max_concurrent_jobs ?? 2;
+    const caps = { jobs: this.cfg.limits.max_concurrent_jobs ?? 2, experiments: experimentOptions(this.cfg).max_concurrent };
     const queued = [...this.jobs.values()].filter(j => j.state === 'queued').sort((a, b) => a.created_at.localeCompare(b.created_at));
     for (const job of queued) {
-      if (this.runningCount() >= cap) break;
+      const lane = laneOf(job);
+      if (this.runningCount(lane) >= caps[lane]) continue;
       job.state = 'running';
       job.started_at = nowIso();
       job.activity = 'starting';
       this.save(job, { immediate: true });
-      const runner = job.kind === 'compose_redeploy' ? this.runComposeJob(job) : this.runJob(job);
+      const runner = job.kind === 'compose_redeploy' ? this.runComposeJob(job) : job.kind === 'experiment' ? this.runExperimentJob(job) : this.runJob(job);
       runner.catch(e => {
         this.log.error(`job ${job.id} crashed: ${e.stack || e.message}`);
         job.error_code = typeof e.code === 'string' ? e.code : 'internal_error';
@@ -524,6 +606,7 @@ export class JobManager {
    * was stopped before reporting one, so a stopped job still says how far it got.
    */
   settleResult(job) {
+    if (job.kind === 'experiment') return; // its result is the experiment report, not one turn's message
     const results = job._results || [];
     let text = '';
     if (results.length) {
@@ -559,7 +642,7 @@ export class JobManager {
     if (job.ticket_input) args.push('--add-dir', job.ticket_input.directory);
     if (job.agent) args.push('--agent', job.agent);
     if (job.model_selected) args.push('--model', job.model_selected);
-    args.push('--append-system-prompt', this.systemPrompt(job, { remote }));
+    args.push('--append-system-prompt', job._system_prompt || this.systemPrompt(job, { remote }));
     if (Array.isArray(c.extra_args)) args.push(...c.extra_args);
     return args;
   }
@@ -590,7 +673,7 @@ export class JobManager {
     return lines.join('\n');
   }
 
-  spawnClaude(job, args) {
+  spawnClaude(job, args, { timeoutMs = job.limits.timeout_minutes * 60_000 } = {}) {
     return new Promise(resolve => {
       const dir = job.project_path;
       const bin = this.cfg.claude.bin || 'claude';
@@ -615,7 +698,6 @@ export class JobManager {
       }
       job.pid = child.pid;
       this.save(job, { immediate: true });
-      const timeoutMs = job.limits.timeout_minutes * 60_000;
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; this.killTree(job); }, timeoutMs);
       this.procs.set(job.id, { child, timer });
@@ -952,6 +1034,12 @@ export class JobManager {
       this.killTree(job);
       await Promise.race([exited, new Promise(r => setTimeout(r, 8000))]);
     }
+    if (job.kind === 'experiment') {
+      // The loop sees the flag at its next step, drops the attempt in progress and puts the checkout back.
+      await Promise.race([job._settled, new Promise(r => setTimeout(r, 60_000).unref())]);
+      const kept = job.experiment?.kept || 0;
+      return { job_id: id, state: job.state, cleanup: [kept ? `${kept} kept commit(s) remain on ${job.branch}` : 'nothing was kept; checkout as it was'] };
+    }
     if (job.kind === 'compose_redeploy') {
       job._cancelled = true;
       const stepAtCancel = job.compose.current_step || '?';
@@ -1001,10 +1089,14 @@ export class JobManager {
 
   /** Kill all running children (server shutdown). Jobs are marked interrupted on next init(). */
   shutdown() {
+    this._shuttingDown = true;
     for (const job of this.jobs.values()) if (job._composeHolder?.child) composeKill(job._composeHolder.child.pid);
     for (const [id] of this.procs) { const job = this.jobs.get(id); if (job) { this.killTree(job); job.state = 'interrupted'; job.finished_at = nowIso(); job.error = 'server shut down while the job was running'; this.save(job, { immediate: true }); } }
   }
 }
+
+/** Experiments queue apart from ordinary jobs. */
+function laneOf(job) { return job.kind === 'experiment' ? 'experiments' : 'jobs'; }
 
 function summarise(list) {
   if (!Array.isArray(list)) return '(unknown)';

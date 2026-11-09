@@ -69,6 +69,27 @@ export const DEFAULTS = {
       retry_after_failure: true,
     },
   },
+  // Experiments (start_experiment): a loop that measures each change and keeps only improvements.
+  experiments: {
+    // Experiments run for a long time, so they queue apart from ordinary jobs.
+    max_concurrent: 1,
+    default_iterations: 6,
+    max_iterations: 30,
+    // Stop after this many attempts in a row without improvement.
+    default_patience: 3,
+    // Limits for the whole experiment, and for one agent turn inside it.
+    timeout_minutes: 90,
+    max_timeout_minutes: 480,
+    attempt_minutes: 15,
+    // No single attempt may spend more than this share of the experiment's cost ceiling.
+    attempt_cost_share: 0.4,
+    // Limit for one run of the measure or check command, and for the one-off setup command.
+    measure_timeout_seconds: 300,
+    setup_timeout_seconds: 900,
+    // Cost ceiling for an experiment; null uses the model tier's ceiling.
+    max_cost_usd: null,
+    branch_prefix: 'experiment/',
+  },
   compose: {
     // Compose projects (directory name OR compose project name) the bridge refuses to touch.
     // The stack that serves the chat UI and the other MCP servers on this box are protected by default.

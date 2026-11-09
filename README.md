@@ -29,10 +29,12 @@ It is general-purpose infrastructure: it knows nothing about any particular proj
 | `list_available_repos` | Repos visible to the stored credentials on each configured host (GitHub, Gitea, GitLab). Marks ones already cloned. Args: `host`, `query`, `limit`. |
 | `continue_task` | Resume a job that stopped short (cost ceiling, timeout, restart). Args: `job_id`, optional `prompt`, `max_cost_usd`, `timeout_minutes`. Runs `claude --resume <session>` in the same checkout with a fresh ceiling and time limit, so the context, commits and unfinished edits of the stopped job are kept. Returns a new `job_id`; `get_task_status` on it reports `continues` and `cost_total_usd` for the chain. |
 | `start_task` | Dispatch work. Args: `project`, `prompt`, `mode` (`plan` default \| `execute`), optional `agent`, `base_branch`, `max_cost_usd`, `timeout_minutes`, `model`, `complexity`, `retry_of`. Returns a `job_id` immediately (non-blocking; measured ~50 ms) along with the model chosen and why. |
+| `start_experiment` | Run a measured optimisation loop (see [Experiments](#experiments)). Args: `project`, `objective`, `measure_command`, `direction` (`minimize` \| `maximize`), `editable[]`, optional `metric_name`, `check_command`, `setup_command`, `max_iterations`, `patience`, `min_improvement`, `measure_runs`, `measure_timeout_seconds`, `target`, `max_cost_usd`, `timeout_minutes`, `model`. Returns a `job_id` immediately. |
+| `apply_experiment` | Publish a finished experiment's kept commits. Args: `job_id`. With `execution_branch` set: onto that branch (fast-forward, or cherry-pick when it has moved) and pushed. Otherwise: the experiment branch is pushed and a draft PR opened. |
 | `get_task_status` | State, elapsed, current activity, branch, PR URL, model, cost, final result / plan text. **Long-polls while a job is active** (`wait_seconds`, default 20, max 50): one call waits for the next state/activity change instead of the caller spinning. Running jobs get a lean payload (~350 bytes); the full record arrives when the job ends. |
 | `get_task_log` | Scrubbed human-readable transcript; `offset` → `next_offset` for incremental polling; `raw=true` for the stream-json events. |
 | `cancel_task` | Kill a queued/running job. Default: discard uncommitted agent work, restore the original branch, delete the job branch. `keep_branch=true` commits partial work and keeps the branch. |
-| `list_jobs` | Recent jobs (Claude tasks and compose redeploys) with state, project, model, one-line summary. Filter by `project` / `state`. |
+| `list_jobs` | Recent jobs (Claude tasks, experiments and compose redeploys) with state, project, model, one-line summary. Filter by `project` / `state`. |
 | `compose_status` | `docker compose ps` — services, state, health, ports, uptime. Read-only, works on protected stacks too. |
 | `compose_logs` | Tail container logs (`services`, `lines`, `since`). Scrubbed. Read-only. |
 | `compose_restart` | `docker compose restart` — no pull, no build. Returns service state before and after. |
@@ -56,10 +58,40 @@ Job states: `queued → running → completed | failed | cancelled | interrupted
 
 Claude still reads the project's `CLAUDE.md`, `.claude/settings*.json`, agents and skills itself — the bridge doesn't strip any of that; it only layers the unattended-run rules on top via `--append-system-prompt`. Projects with no `.claude` setup run plainly.
 
+## Experiments
+
+`start_experiment` is the bridge's version of [karpathy/autoresearch](https://github.com/karpathy/autoresearch): one metric, one fixed way of measuring it, a narrow place the agent may change, and a loop that keeps only what makes the number better. It fits anything with a number that says "better" and a command that prints it: a benchmark time, a bundle size, the score of an evaluation script over a prompt or a skill file, a count of failing cases. It does not fit a bug fix or a feature; those are `start_task`.
+
+What differs from autoresearch is who is trusted. There the agent runs the training, reads the number and does the `git reset` itself. Here the agent only proposes; everything that decides the outcome is the bridge's:
+
+1. Pre-flight as for any job (project inside the workspace, clean tree, one job per project), plus: every `editable` path must exist, and the whole repository cannot be editable.
+2. The bridge reconciles the checkout with origin, then creates a local branch `experiment/<slug>-<id>`. With `setup_command` it runs that once (it may only produce files git ignores).
+3. **Baseline.** `check_command` (if given) must pass and `measure_command` must print the metric before any change, or the job fails with `baseline_check_failed` / `baseline_failed` and nothing is left behind.
+4. **Each attempt.** One Claude turn (the same session resumed, so it remembers what it tried) makes one change and stops. The bridge then:
+   - takes the tree the agent left, whatever it did with git, and compares it with where the turn started;
+   - discards the attempt whole if any changed file is outside `editable` (`out_of_scope`), or if the checkout was moved off the experiment branch (`rule_break`; the base branch is put back too);
+   - commits the candidate, runs `check_command` (`check_failed` on a non-zero exit), then `measure_command` (`crash` on a non-zero exit, a timeout or no metric line), `measure_runs` times, taking the median;
+   - keeps the commit if the metric beat the best so far by more than `min_improvement` (`keep`), otherwise `git reset --hard` to the previous state (`discard`);
+   - tells the agent the outcome and the best so far, and asks for the next change.
+5. It stops at `max_iterations` (default 6, at most 30), after `patience` attempts in a row without a gain (default 3), when the agent ends a turn with `DONE:`, at `target`, at the cost ceiling or at the time limit (default 90 minutes). A single attempt may use at most 40% of the cost ceiling and 15 minutes; one stopped short is reverted and the loop carries on.
+6. The checkout goes back to the branch it was on. Kept commits stay on the experiment branch, **local and unpushed**; a branch that kept nothing is deleted. The job's `result` is the report: baseline, best, a row per attempt, and where the commits are. `results.tsv` in the job directory has the same rows.
+7. `apply_experiment` publishes. If the target branch has not moved, that is a fast-forward and the measured state is exactly what is pushed. If it has moved, the commits are cherry-picked and the result says the metric was **not** re-measured on the new base; a conflict aborts and changes nothing.
+
+The metric is read from the measurement's stdout: the last line of the form `metric: 12.4` (or `<metric_name>: 12.4`, `=` also accepted, a unit after the number is ignored), else a bare number on the last non-empty line.
+
+Things the bridge cannot do for you:
+
+- **The measurement has to be out of reach.** `editable` is a whitelist, so a script, fixture or test outside it cannot be touched. If the number is computed from something inside it, an agent can move the number without improving anything.
+- **Noise.** A timing that varies 3% run to run will "improve" by chance. Use `measure_runs: 3` and a `min_improvement` above the noise.
+- **Ignored files persist between attempts** (`git clean` leaves them, which is what keeps `node_modules` installed). A warm cache can make a later attempt look faster than an earlier one.
+- **`check_command` is the only thing protecting behaviour.** Without it, "faster" can mean "does less".
+
+Experiments queue in their own lane (`experiments.max_concurrent`, default 1), so a long one does not hold up ordinary jobs; it does hold its project. Cancelling drops the attempt in progress and keeps what was already kept. A restart mid-experiment marks it `interrupted` and puts the checkout back at the next start.
+
 ### Where things live
 
 - Repo: `~/code/claude-code-bridge` (excluded from discovery by config).
-- Data: `~/.local/share/claude-code-bridge/jobs/<job_id>/{job.json,transcript.log,stream.jsonl,plan.md}` — flat JSON, survives restarts. The last 500 jobs are kept.
+- Data: `~/.local/share/claude-code-bridge/jobs/<job_id>/{job.json,transcript.log,stream.jsonl,plan.md,results.tsv}` — flat JSON, survives restarts. The last 500 jobs are kept.
 - Token: `~/.config/claude-code-bridge/token` (0600, generated on first start).
 
 ## Install / run
@@ -163,6 +195,7 @@ Where a project under `~/code` has a Compose file, the bridge can inspect, resta
 | `claude.bin` / `extra_args` / `branch_prefix` / `commit_author` | How Claude is invoked. |
 | `models.tiers.<tier>` | `{model, max_cost_usd, aliases[]}` per tier; `models.default_tier` / `complex_tier` name which is which. |
 | `models.escalation` | `complex_agents[]`, `prompt_length_chars`, `file_references`, `plan_without_claude_setup`, `retry_after_failure`. |
+| `experiments.*` | `max_concurrent` (1), `default_iterations` (6), `max_iterations` (30), `default_patience` (3), `timeout_minutes` (90), `max_timeout_minutes` (480), `attempt_minutes` (15), `attempt_cost_share` (0.4), `measure_timeout_seconds` (300), `setup_timeout_seconds` (900), `max_cost_usd` (null = tier ceiling), `branch_prefix`. |
 | `compose.protected[]` | Stacks the bridge refuses to restart/stop/up/redeploy. `redeploy_timeout_minutes`, `restart_timeout_seconds`, `logs_default_lines`. |
 | `projects.<name>` | Per-project overrides: `default_branch`, `job_timeout_minutes`, `max_cost_usd`, `allow_untracked`, `tier`. |
 
@@ -215,6 +248,7 @@ If Claude Code changes the stream-json shape, the parser is `JobManager.handleEv
 src/index.js        HTTP server, bearer auth, stateless Streamable HTTP transport
 src/tools.js        MCP tool definitions (all output scrubbed)
 src/jobs.js         queue, Claude spawn, stream parsing, branch/push/PR, cancel, restart recovery
+src/experiments.js  start_experiment: the measure/keep/revert loop, its report, apply_experiment
 src/projects.js     discovery + .claude setup / agent detection
 src/clone.js        clone_project, list_available_repos
 src/compose.js      compose file detection, target resolution, protected list, compose ops

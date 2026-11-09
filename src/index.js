@@ -84,6 +84,7 @@ async function main() {
       `Claude Code Bridge: dispatches engineering tasks to Claude Code (headless) against repositories under ${cfg.workspace_root}, and clones new ones.`,
       'Workflow: list_projects -> start_task (mode "plan" by default; pass mode "execute" to make changes) -> poll get_task_status / get_task_log (use next_offset) -> report the branch / draft PR URL. Nothing is ever merged automatically.',
       'Tasks run for minutes: start_task returns immediately with a job_id; poll rather than wait.',
+      'When the goal is to improve a number rather than to make a change (a benchmark, a size, an evaluation score): start_experiment runs a measure/keep/revert loop and reports every attempt; apply_experiment publishes what it kept.',
     ].join('\n') });
     registerTools(server, { cfg, projects, jobs, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

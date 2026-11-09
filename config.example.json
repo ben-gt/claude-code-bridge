@@ -60,6 +60,21 @@
     }
   },
 
+  "experiments": {
+    "_comment": "start_experiment: a loop that measures each change and keeps only improvements. They queue apart from ordinary jobs. attempt_cost_share caps one attempt at that share of the experiment's cost ceiling; max_cost_usd null uses the model tier's ceiling.",
+    "max_concurrent": 1,
+    "default_iterations": 6,
+    "max_iterations": 30,
+    "default_patience": 3,
+    "timeout_minutes": 90,
+    "max_timeout_minutes": 480,
+    "attempt_minutes": 15,
+    "attempt_cost_share": 0.4,
+    "measure_timeout_seconds": 300,
+    "setup_timeout_seconds": 900,
+    "max_cost_usd": null,
+    "branch_prefix": "experiment/"
+  },
   "compose": {
     "_comment": "protected: project directory names OR compose project names the bridge refuses to restart/stop/up/redeploy (status/logs still work). Keep the stack serving the chat UI and any other MCP servers here. Remove an entry to opt out.",
     "protected": ["openui", "form-submissions", "dms-v3-form-submissions", "claude-code-bridge"],
