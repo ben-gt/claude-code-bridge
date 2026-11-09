@@ -120,6 +120,45 @@ test('a job stopped at its cost ceiling reports how far it got and how to finish
   assert.equal(status.usage.cache_read_input_tokens, 2952411);
 });
 
+test('a ceiling that lands on the closing summary is a finished job, not a stopped one', async t => {
+  const f = fixture(t, { remote: true });
+  const summary = 'All four items are implemented, tested and committed on testing/passkeys (tree clean). ' + 'Per item: what changed, how it was checked. '.repeat(20);
+  const j = await run(f, 'execute', job => {
+    job.session_id = 'sess-1';
+    f.commit('done.txt', 'all of it');
+    say(f.m, job, summary);
+    budgetStop(f.m, job, 20.1667);
+  });
+  assert.equal(j.state, 'completed');
+  assert.equal(j.error_code ?? null, null);
+  assert.equal(j.result_text, summary.trim());
+  assert.doesNotMatch(j.result_text, /Stopped before a final summary/);
+  assert.ok(j.notes.some(n => /as the agent wrote its closing message/.test(n)));
+  assert.equal(f.m.status(j.id).next_step ?? null, null);
+});
+
+test('a long last message does not finish a job that left edits uncommitted or was about to call a tool', async t => {
+  const f = fixture(t, { remote: true });
+  const long = 'Schema and API are committed. '.repeat(30);
+  const dirty = await run(f, 'execute', job => {
+    job.session_id = 'sess-1';
+    fs.writeFileSync(path.join(f.repo, 'half.txt'), 'unfinished');
+    say(f.m, job, long);
+    budgetStop(f.m, job, 12);
+  });
+  assert.equal(dirty.state, 'failed');
+  assert.equal(dirty.error_code, 'cost_ceiling');
+  f.git('checkout', '--', '.'); fs.rmSync(path.join(f.repo, 'half.txt'), { force: true });
+  const midway = await run(f, 'execute', job => {
+    job.session_id = 'sess-2';
+    say(f.m, job, long);
+    f.m.handleEvent(job, JSON.stringify({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 'toolu_9', name: 'Bash', input: { command: 'npm test' } }] } }));
+    budgetStop(f.m, job, 12);
+  });
+  assert.equal(midway.state, 'failed');
+  assert.match(midway.result_text, /Stopped before a final summary/);
+});
+
 test('a stopped plan job leaves no empty plan file behind', async t => {
   const f = fixture(t);
   const j = await run(f, 'plan', job => { say(f.m, job, 'Reading the screen component.'); budgetStop(f.m, job); });

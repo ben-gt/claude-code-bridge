@@ -18,6 +18,8 @@ import { normaliseSpec, runExperiment, applyExperiment, restoreCheckout, experim
 export const STATES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'];
 const ACTIVE = new Set(['queued', 'running']);
 const RESULT_MAX_CHARS = 20000;
+/** A turn-ending message at least this long is a summary, not a remark made on the way to the next step. */
+const CLOSING_MESSAGE_MIN_CHARS = 600;
 
 function newJobId() {
   return `j_${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
@@ -563,13 +565,20 @@ export class JobManager {
 
     // A session can report several results (one per turn, including turns woken by its own background
     // work). The job's answer is the substantive one, not whichever happened to come last.
-    const delivered = (job._results || []).length > 0;
+    // The ceiling can land on the very response that closes the session: the agent's summary is out, but the
+    // session reports a budget error instead of a result. That is a finished job, not a stopped one, when the
+    // turn ended on a substantial message (not a tool call) and, for an execute job, nothing is left uncommitted.
+    if (job._budgetStop && !(job._results || []).length && job._lastBlock === 'text' && (job._lastText || '').length >= CLOSING_MESSAGE_MIN_CHARS) {
+      const tidy = job.mode !== 'execute' || !job.project_path || !(await workingTreeStatus(job.project_path, { timeoutMs: 60_000 }).catch(() => ({ dirty: true }))).dirty;
+      if (tidy) job._closingMessage = true;
+    }
+    const delivered = (job._results || []).length > 0 || !!job._closingMessage;
     this.settleResult(job);
     if (job._modelUnrecognized && !job._resultError) job._resultError = `model "${job.model_selected}" (tier ${job.tier}) is not available to this Claude Code login — no fallback attempted`;
     const stopped = exit.timedOut ? `the ${job.limits.timeout_minutes}-minute time limit` : job._budgetStop ? `the $${job.limits.max_cost_usd} cost ceiling` : null;
     if (stopped && delivered && !job._resultError) {
       // The agent had already given its final answer; only follow-up activity was cut short.
-      job.notes.push(`reached ${stopped} after the agent had delivered its result; treated as complete`);
+      job.notes.push(job._closingMessage ? `reached ${stopped} as the agent wrote its closing message; treated as complete` : `reached ${stopped} after the agent had delivered its result; treated as complete`);
       await this.postProcess(job, { remote, abnormal: false });
       return this.finish(job, 'completed');
     }
@@ -617,7 +626,7 @@ export class JobManager {
       for (let i = 1; i < results.length; i++) if (results[i].length > results[main].length) main = i;
       text = [results[main], ...results.slice(main + 1)].join('\n\n---\n\n');
     } else if (job._lastText) {
-      text = `(Stopped before a final summary. The agent's last message was:)\n\n${job._lastText}`;
+      text = job._closingMessage ? job._lastText : `(Stopped before a final summary. The agent's last message was:)\n\n${job._lastText}`;
     }
     job.result_text = text ? scrub(text) : null;
     if (job.mode === 'plan') {
@@ -755,6 +764,8 @@ export class JobManager {
       job.activity = `session started (${job.model || 'model?'})`;
       this.appendTranscript(job, `>> session ${job.session_id} started, model=${job.model}, tools=${Array.isArray(ev.tools) ? ev.tools.length : '?'}${ev.permissionMode ? `, permissions=${ev.permissionMode}` : ''}`);
     } else if (t === 'assistant' && ev.message?.content) {
+      // What the agent itself last emitted: a response that ends on text (no tool call) ended its turn.
+      if (!ev.parent_tool_use_id && ev.message.content.length) job._lastBlock = ev.message.content[ev.message.content.length - 1].type;
       for (const block of ev.message.content) {
         if (block.type === 'text' && block.text?.trim()) {
           if (!ev.parent_tool_use_id) job._lastText = block.text.trim();
