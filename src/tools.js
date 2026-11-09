@@ -103,9 +103,23 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}). Poll get_task_status with this job_id.`);
   }, 'start_task'));
 
+  server.registerTool('continue_task', {
+    title: 'Continue a stopped task',
+    description: 'Resume the Claude session of a job that stopped short — cost ceiling, timeout or a restart — in the same checkout, keeping its context, commits and unfinished edits, under a fresh cost ceiling and time limit. Use this instead of start_task whenever get_task_status shows next_step: starting again pays to rediscover the repository and can collide with the work already there. Returns a new job_id; poll it like any other. Optional prompt replaces the default "continue and finish" instruction.',
+    inputSchema: {
+      job_id: z.string().describe('The stopped job to continue'),
+      prompt: z.string().max(12000).optional().describe('What to do next (default: finish the original task and summarise)'),
+      max_cost_usd: z.number().positive().optional().describe('Cost ceiling for this continuation (default is the tier ceiling)'),
+      timeout_minutes: z.number().positive().max(180).optional().describe('Hard timeout for this continuation'),
+    },
+  }, wrap(async args => {
+    const r = await jobs.continueJob(args);
+    return ok(r, `job ${r.job_id} ${r.state}: continues ${r.continues} (${r.mode} mode on ${r.project}, model ${r.model}). Poll get_task_status with this job_id.`);
+  }, 'continue_task'));
+
   server.registerTool('get_task_status', {
     title: 'Get task status',
-    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, model used + tier + why, cost, and the final result or plan text when finished. While a job is running this LONG-POLLS: it waits up to wait_seconds (default 20, max 50) for the state/activity to change before answering, so call it once per check rather than repeatedly. Running jobs return a lean payload; the full record comes when the job ends. For compose redeploy jobs: steps and service state before/after.',
+    description: 'State (queued|running|completed|failed|cancelled|interrupted), elapsed time, current activity, branch, PR URL, model used + tier + why, cost, and the final result or plan text when finished. A job that stopped short (error_code cost_ceiling or job_timeout) still returns the last message from the agent as result, says where its commits are, and carries next_step naming the continue_task call that finishes it. While a job is running this LONG-POLLS: it waits up to wait_seconds (default 20, max 50) for the state/activity to change before answering, so call it once per check rather than repeatedly. Running jobs return a lean payload; the full record comes when the job ends. For compose redeploy jobs: steps and service state before/after.',
     inputSchema: { job_id: z.string(), wait_seconds: z.number().min(0).max(50).optional().describe('Seconds to wait for a change while the job is active (default 20; 0 = answer immediately)') },
   }, wrap(async ({ job_id, wait_seconds }) => {
     const w = wait_seconds === undefined ? 20 : wait_seconds;

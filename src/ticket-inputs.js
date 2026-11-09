@@ -5,6 +5,15 @@ import { createHash } from 'node:crypto';
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_TOTAL_BYTES = 15 * 1024 * 1024;
 
+/**
+ * Name the stored copy with plain characters only. Screenshot names carry spaces that are not spaces
+ * (macOS writes U+202F before "am"), and an agent retyping the path gets it wrong and cannot open the file.
+ */
+export function storedName(filename) {
+  const safe = String(filename).normalize('NFKD').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_').replace(/^[_.]+/, '').slice(-120);
+  return safe || 'attachment';
+}
+
 export function validateTicketInput(input) {
   if (input == null) return null;
   if (!/^[A-Z0-9]{8}$/.test(input.ticket_id || '')) throw new Error('Invalid Flux ticket ID');
@@ -18,7 +27,7 @@ export function validateTicketInput(input) {
     if (bytes.toString('base64') !== a.data_base64) throw new Error('Invalid attachment data');
     total += bytes.length;
     if (bytes.length > MAX_ATTACHMENT_BYTES || total > MAX_TOTAL_BYTES) throw new Error('Attachment size limit exceeded');
-    return { filename: a.filename, stored_name: `${index + 1}-${a.filename}`, bytes, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+    return { filename: a.filename, stored_name: `${index + 1}-${storedName(a.filename)}`, bytes, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
   });
   return { ticket_id: input.ticket_id, text: input.text, attachments };
 }
