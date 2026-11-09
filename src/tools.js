@@ -114,7 +114,8 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     },
   }, wrap(async args => {
     const r = await jobs.continueJob(args);
-    return ok(r, `job ${r.job_id} ${r.state}: continues ${r.continues} (${r.mode} mode on ${r.project}, model ${r.model}). Poll get_task_status with this job_id.`);
+    // Same opening as start_task ("job <id> <state> ("): Robut's watcher recognises a new job by it.
+    return ok(r, `job ${r.job_id} ${r.state} (continues ${r.continues}; ${r.mode} mode on ${r.project}, model ${r.model}). Poll get_task_status with this job_id.`);
   }, 'continue_task'));
 
   server.registerTool('get_task_status', {
