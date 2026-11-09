@@ -349,6 +349,8 @@ export class JobManager {
       summary: trunc(`continues ${prev.id}: ${prev.summary}`, 100),
       model_selected: model, tier: prev.tier, model_reason: `continues ${prev.id} on the same model`, retry_of: null,
       continues: prev.id, resume_session: prev.session_id, allow_dirty: allowDirty || undefined,
+      // A resumed session reports cost and usage for its whole life; what came before is subtracted to get this run's.
+      session_base: { cost_usd: prev.session_cost_usd ?? prev.cost_usd ?? 0, usage: prev.session_usage || prev.usage || null },
       state: 'queued', created_at: nowIso(), started_at: null, finished_at: null, activity: 'queued',
       base_branch: prev.base_branch || null, branch: null, original_branch: null, commits: null, pushed: null, pr_url: null,
       session_id: null, model: null, cost_usd: null, usage: null, num_turns: null, result_text: null, plan_file: null,
@@ -486,12 +488,12 @@ export class JobManager {
     if (exit.timedOut) {
       await this.postProcess(job, { remote, abnormal: true });
       job.error_code = 'job_timeout';
-      return this.finish(job, 'failed', `timed out after ${job.limits.timeout_minutes} minutes (hard limit) before the agent gave a final result; ${this.retainedWork(job)}${job.publication_error ? `; ${job.publication_error}` : ''}`);
+      return this.finish(job, 'failed', `timed out after ${job.limits.timeout_minutes} minutes (hard limit) before the agent gave a final result; ${this.retainedWork(job)}${job.publication_error ? `; ${job.publication_error}` : ''}. continue_task ${job.id} resumes it where it stopped`);
     }
     if (job._budgetStop && !job._resultError) {
       await this.postProcess(job, { remote, abnormal: true });
       job.error_code = 'cost_ceiling';
-      return this.finish(job, 'failed', `cost ceiling of $${job.limits.max_cost_usd} reached (spent $${job.cost_usd}) before the agent gave a final result; ${this.retainedWork(job)}${job.publication_error ? `; ${job.publication_error}` : ''}`);
+      return this.finish(job, 'failed', `cost ceiling of $${job.limits.max_cost_usd} reached (spent $${job.cost_usd}) before the agent gave a final result; ${this.retainedWork(job)}${job.publication_error ? `; ${job.publication_error}` : ''}. continue_task ${job.id} resumes it where it stopped`);
     }
     if (exit.code !== 0 && !job._resultSeen) {
       await this.postProcess(job, { remote, abnormal: true });
@@ -686,12 +688,19 @@ export class JobManager {
       }
     } else if (t === 'result') {
       job._resultSeen = true;
-      job.cost_usd = typeof ev.total_cost_usd === 'number' ? Math.round(ev.total_cost_usd * 10000) / 10000 : job.cost_usd;
+      if (typeof ev.total_cost_usd === 'number') {
+        job.session_cost_usd = Math.round(ev.total_cost_usd * 10000) / 10000;
+        job.cost_usd = ownShare(job.session_cost_usd, job.session_base?.cost_usd);
+      }
       job.num_turns = (job.num_turns || 0) + (ev.num_turns || 0);
       // modelUsage is cumulative for the session (sub-agents included); the per-result `usage` only covers
       // the last turn and is all zeros on a stop, so it must never replace what was counted.
       const total = totalModelUsage(ev.modelUsage);
-      if (total) job.usage = total;
+      if (total) {
+        job.session_usage = total;
+        const base = job.session_base?.usage;
+        job.usage = base ? Object.fromEntries(Object.entries(total).map(([k, v]) => [k, ownShare(v, base[k])])) : total;
+      }
       const text = typeof ev.result === 'string' ? ev.result.trim() : '';
       const budget = ev.subtype === 'error_max_budget_usd' || /max.?budget/i.test(ev.subtype || '');
       if (budget) {
@@ -1017,6 +1026,11 @@ function pickUsage(u) {
     cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
     cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
   };
+}
+/** This run's part of a session-wide figure. A session that did not carry its history forward reports the run alone. */
+function ownShare(total, before) {
+  const b = Number(before) || 0;
+  return total >= b ? Math.round((total - b) * 10000) / 10000 : total;
 }
 function totalModelUsage(modelUsage) {
   const rows = modelUsage && typeof modelUsage === 'object' ? Object.values(modelUsage) : [];

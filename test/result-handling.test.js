@@ -146,7 +146,8 @@ test('continue_task resumes the stopped session with its unfinished edits in pla
   f.m.spawnClaude = async (job, a) => {
     args = a;
     f.commit('wip.txt', 'finished');
-    result(f.m, job, { result: 'Finished the second change; tests pass.', total_cost_usd: 2 });
+    // A resumed session reports its whole life: the stopped run's $5.0677 plus this run's $2.
+    result(f.m, job, { result: 'Finished the second change; tests pass.', total_cost_usd: 7.0677, modelUsage: { 'claude-opus-5': { inputTokens: 130, outputTokens: 50000, cacheReadInputTokens: 3952411, cacheCreationInputTokens: 327739 } } });
     return { code: 0 };
   };
   await f.m.runJob(next);
@@ -154,6 +155,9 @@ test('continue_task resumes the stopped session with its unfinished edits in pla
   assert.equal(next.state, 'completed');
   assert.equal(next.pushed, true);
   assert.equal(f.originHead(), f.git('rev-parse', 'HEAD'));
+  assert.equal(next.cost_usd, 2);
+  assert.equal(next.session_cost_usd, 7.0677);
+  assert.deepEqual(next.usage, { input_tokens: 12, output_tokens: 1550, cache_creation_input_tokens: 0, cache_read_input_tokens: 1000000 });
   assert.equal(f.m.status(next.id).cost_total_usd, 7.0677);
   assert.equal(f.m.status(first.id).next_step, undefined);
   await assert.rejects(f.m.continueJob({ job_id: first.id }), /already continued/);
