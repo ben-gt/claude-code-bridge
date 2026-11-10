@@ -178,18 +178,23 @@ test('continue_task resumes the stopped session with its unfinished edits in pla
     budgetStop(f.m, job);
   });
   assert.equal(first.state, 'failed');
-  assert.equal(fs.readFileSync(path.join(f.repo, 'wip.txt'), 'utf8'), 'unfinished');
-  // A fresh start is still refused on the dirty tree; the continuation is the way through.
-  await assert.rejects(f.m.start({ project: 'app', prompt: 'Something else', mode: 'execute' }), /uncommitted changes/);
+  // The unfinished edit is parked, not left in the way: the checkout is clean for whatever comes next.
+  assert.equal(fs.existsSync(path.join(f.repo, 'wip.txt')), false);
+  assert.equal(first.parked_ref, `refs/bridge/parked/${first.id}`);
+  const other = await f.m.start({ project: 'app', prompt: 'Something else', mode: 'execute' });
+  f.m.get(other.job_id).state = 'cancelled';
 
   const r = await f.m.continueJob({ job_id: first.id });
   const next = f.m.get(r.job_id); next.state = 'running';
   assert.equal(next.continues, first.id);
+  assert.equal(next.restore_parked, first.parked_ref);
   assert.equal(f.m.get(first.id).continued_by, next.id);
   assert.equal(r.spent_so_far_usd, 5.0677);
   let args;
   f.m.spawnClaude = async (job, a) => {
     args = a;
+    assert.equal(fs.readFileSync(path.join(f.repo, 'wip.txt'), 'utf8'), 'unfinished', 'parked edit is back before the session resumes');
+    assert.match(a[a.indexOf('--append-system-prompt') + 1], /uncommitted edits put back/);
     f.commit('wip.txt', 'finished');
     // A resumed session reports its whole life: the stopped run's $5.0677 plus this run's $2.
     result(f.m, job, { result: 'Finished the second change; tests pass.', total_cost_usd: 7.0677, modelUsage: { 'claude-opus-5': { inputTokens: 130, outputTokens: 50000, cacheReadInputTokens: 3952411, cacheCreationInputTokens: 327739 } } });

@@ -395,7 +395,12 @@ test('an experiment waits in its own lane and holds its project', async t => {
   await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
   assert.deepEqual(started.sort(), [exp.job_id, task.job_id].sort(), 'the ordinary job is not queued behind the experiment');
   assert.equal(f.m.get(exp.job_id).state, 'running');
-  await assert.rejects(f.m.start({ project: 'app', prompt: 'Fix', mode: 'plan' }), /already has an active experiment job/);
+  const queued = await f.m.start({ project: 'app', prompt: 'Fix', mode: 'plan' });
+  assert.equal(f.m.get(queued.job_id).state, 'queued', 'a job on the experiment\'s project waits behind it');
+  assert.equal(queued.waiting_for, exp.job_id);
+  await new Promise(r => setImmediate(r));
+  assert.equal(started.includes(queued.job_id), false);
+  f.m.get(queued.job_id).state = 'cancelled';
   await assert.rejects(f.m.applyExperiment({ job_id: exp.job_id }), /still running/);
   await assert.rejects(f.m.continueJob({ job_id: exp.job_id }), /not a Claude Code job/);
 });

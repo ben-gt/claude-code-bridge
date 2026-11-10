@@ -112,7 +112,7 @@ test('fetch failure is actionable and leaves the checkout intact', async t => {
   assert.equal(f.git('rev-parse', 'HEAD'), head);
 });
 
-test('timeout pushes existing commits but leaves unfinished staged and untracked work untouched', async t => {
+test('timeout pushes existing commits and parks unfinished staged and untracked work on a ref', async t => {
   const f = remoteFixture(t);
   let completed;
   f.m.spawnClaude = async () => {
@@ -128,12 +128,16 @@ test('timeout pushes existing commits but leaves unfinished staged and untracked
   assert.equal(j.pushed, true);
   assert.equal(f.remoteHead(), completed);
   assert.equal(f.git('show', 'HEAD:file.txt'), 'before');
-  assert.equal(f.git('show', ':file.txt'), 'unfinished');
-  assert.match(f.git('status', '--porcelain'), /\?\? draft.txt/);
   assert.equal(j.commits, 1);
+  // The checkout is clean for the next job; the half-done work is on the parked ref, staged and untracked alike.
+  assert.equal(f.git('status', '--porcelain'), '');
+  assert.equal(j.parked_ref, `refs/bridge/parked/${j.id}`);
+  assert.equal(f.git('show', `${j.parked_ref}:file.txt`), 'unfinished');
+  assert.equal(f.git('show', `${j.parked_ref}:draft.txt`), 'not tested');
+  assert.match(j.error, /parked at refs\/bridge\/parked/);
 });
 
-test('timeout without commits leaves partial edits uncommitted and does not push', async t => {
+test('timeout without commits parks partial edits and does not push', async t => {
   const f = remoteFixture(t);
   const head = f.remoteHead();
   f.m.spawnClaude = async () => { fs.writeFileSync(path.join(f.repo, 'file.txt'), 'partial'); return {timedOut: true}; };
@@ -141,7 +145,8 @@ test('timeout without commits leaves partial edits uncommitted and does not push
   assert.equal(j.commits, 0);
   assert.notEqual(j.pushed, true);
   assert.equal(f.remoteHead(), head);
-  assert.match(f.git('status', '--porcelain'), /file.txt/);
+  assert.equal(f.git('status', '--porcelain'), '');
+  assert.equal(f.git('show', `${j.parked_ref}:file.txt`), 'partial');
 });
 
 test('timeout push rejection keeps commits and timeout reason with publication diagnostics', async t => {

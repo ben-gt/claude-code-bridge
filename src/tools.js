@@ -85,7 +85,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
 
   server.registerTool('start_task', {
     title: 'Start a Claude Code task',
-    description: `Dispatch a natural-language task to Claude Code (headless) in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. Refused if the working tree is dirty or the project already has an active job. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}).`,
+    description: `Dispatch a natural-language task to Claude Code (headless) in a project. Returns a job_id immediately; poll get_task_status / get_task_log. mode "plan" (default) only investigates and returns a plan — no files change. mode "execute" creates a fresh branch off the default branch (never commits to it), lets Claude work, commits leftovers, pushes and opens a DRAFT PR when a remote exists (or reports the local branch when it doesn't). Nothing is ever merged. One job runs per project at a time: a job asked for while the project is busy is QUEUED (queue_position, waiting_for) and starts by itself when the checkout is free — do not re-submit it. Refused only if the working tree holds uncommitted changes that belong to nobody's job. Where a project has a deploy command configured, an execute job that pushed commits then builds and deploys them to the demo before it reports (its result ends with a "Deployment" section saying whether the change is live); pass deploy=false to skip that. Bounded by a hard timeout (${cfg.limits.job_timeout_minutes} min) and cost ceiling ($${cfg.limits.max_cost_usd}).`,
     inputSchema: {
       project: z.string().describe('Project name as shown by list_projects'),
       prompt: z.string().describe('What to do, in natural language'),
@@ -98,15 +98,16 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
       complexity: z.enum(['low', 'normal', 'high']).optional().describe('"high" escalates to the complex tier'),
       ticket_context: z.object({ticket_id:z.string(),text:z.string().max(200000),attachments:z.array(z.object({filename:z.string(),data_base64:z.string()})).max(20)}).optional().describe('Authorised ticket text and attachment bytes supplied by the Robut gateway; kept outside the repository.'),
       retry_of: z.string().optional().describe('job_id of a previous failed attempt; retries escalate automatically'),
+      deploy: z.boolean().optional().describe('execute mode only: deploy the pushed commits to the demo when the job finishes (default: the project\'s configured setting). false = push only.'),
     },
   }, wrap(async args => {
     const r = await jobs.start(args);
-    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}). Poll get_task_status with this job_id.`);
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.deploys_when_done ? '; deploys to the demo when done' : ''}).${r.waiting_for ? ` Queued behind ${r.waiting_for}; it starts by itself.` : ''} Poll get_task_status with this job_id.`);
   }, 'start_task'));
 
   server.registerTool('continue_task', {
     title: 'Continue a stopped task',
-    description: 'Resume the Claude session of a job that stopped short — cost ceiling, timeout or a restart — in the same checkout, keeping its context, commits and unfinished edits, under a fresh cost ceiling and time limit. Use this instead of start_task whenever get_task_status shows next_step: starting again pays to rediscover the repository and can collide with the work already there. Returns a new job_id; poll it like any other. Optional prompt replaces the default "continue and finish" instruction.',
+    description: 'Resume the Claude session of a job that stopped short — cost ceiling, timeout or a restart — in the same checkout, keeping its context, commits and unfinished edits (parked by the bridge when it stopped, put back when it resumes), under a fresh cost ceiling and time limit. Use this instead of start_task whenever get_task_status shows next_step: starting again pays to rediscover the repository and can collide with the work already there. Returns a new job_id; poll it like any other. Optional prompt replaces the default "continue and finish" instruction.',
     inputSchema: {
       job_id: z.string().describe('The stopped job to continue'),
       prompt: z.string().max(12000).optional().describe('What to do next (default: finish the original task and summarise)'),
@@ -116,7 +117,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   }, wrap(async args => {
     const r = await jobs.continueJob(args);
     // Same opening as start_task ("job <id> <state> ("): Robut's watcher recognises a new job by it.
-    return ok(r, `job ${r.job_id} ${r.state} (continues ${r.continues}; ${r.mode} mode on ${r.project}, model ${r.model}). Poll get_task_status with this job_id.`);
+    return ok(r, `job ${r.job_id} ${r.state} (continues ${r.continues}; ${r.mode} mode on ${r.project}, model ${r.model}).${r.waiting_for ? ` Queued behind ${r.waiting_for}; it starts by itself.` : ''} Poll get_task_status with this job_id.`);
   }, 'continue_task'));
 
   const xo = experimentOptions(cfg);
