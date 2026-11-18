@@ -262,3 +262,47 @@ deploy/             systemd unit
 scripts/            install.sh, token.sh, rotate-token.sh, register-openwebui.sh, mcp-call.sh
 test/               node:test unit tests
 ```
+
+## Deployment profile (a server with its own line of work)
+
+By default the bridge works on one shared branch (`execution_branch`) in the workspace checkout and pushes
+it to origin under the same name. A server that must not publish to that branch (a copy of the demo with
+its own fixes, for example) sets a `deployment` block in `config.local.json` instead:
+
+```json
+"deployment": {
+  "name": "my copy", "site": "copy.example",
+  "push_branch": "feature/my-copy",            // the ONLY branch the bridge ever pushes
+  "work_branch": "bridge/my-copy-line",        // local branch of the bridge's own worktrees; never pushed
+  "worktree_dir": ".bridge-lines",             // <workspace_root>/.bridge-lines/<project>
+  "base_ref": "origin/testing/passkeys",       // read-only start for a project with nothing pushed yet
+  "forbidden_push_branches": ["testing/passkeys", "main", "master"],
+  "forbidden_commands": ["/srv/bridge-deploy/deploy.sh"],
+  "rules": ["extra sentences for the agent"]
+},
+"projects": { "my-app": { "line": { "worktree": "/srv/work/my-app-live", "branch": "feature/x" },
+                          "deploy": { "auto": true, "command": ["/srv/copy-deploy/deploy.sh"] } } }
+```
+
+- **Working copy.** A job (plan or execute) runs in the bridge's own git worktree of the project, never in
+  the workspace checkout and never in anybody else's worktree. Before each job it is brought up to the
+  project's **line**: the HEAD of `line.worktree` (the worktree people and other agents build from), or
+  `origin/<push_branch>`, or `base_ref`. `node_modules` of the workspace checkout is shared by symlink.
+- **Publishing.** The job's commits are merged into the line with `git merge --ff-only` run in the line
+  worktree, then pushed to `push_branch` (never forced). If the line moved while the job ran, the commits
+  are rebased onto it first. The job fails, with nothing merged, pushed or deployed and the commits kept on
+  `rescue/bridge-<job>`, when they conflict with the line (`line_conflict`), when uncommitted edits in the
+  line worktree touch the same files (`line_merge_refused`), or when origin has commits the line lacks
+  (`line_behind_remote`). A line that no longer matches its configuration stops the job before it starts
+  (`line_stale`). Commits left behind by a refused merge are carried forward by the next job if they still
+  apply, otherwise set aside on the rescue ref, so a project is never blocked.
+- **Guards.** Every `git push` the bridge runs is checked: only a plain update of `push_branch` passes. The
+  agent's own shell gets git configuration (through the environment) that sends any push to a known host
+  nowhere. The bridge does not start with a deploy command listed in `forbidden_commands`, and refuses one
+  at deploy time. Experiments, `apply_experiment` and `clone_project` are refused under a profile.
+  `base_branch` passed by a caller is not used (the result says so).
+- **Deploy command** additionally receives `BRIDGE_PUSH_BRANCH`, `BRIDGE_LINE_WORKTREE`, `BRIDGE_REPO_PATH`,
+  `BRIDGE_START_SHA` (where the line was before the job) and `BRIDGE_DEPLOYMENT`.
+
+Removing the block (and setting `execution_branch` again) restores the original behaviour. Tests:
+`test/deployment-line.test.js`.

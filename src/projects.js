@@ -5,6 +5,7 @@ import { realWorkspaceRoot, isInside } from './paths.js';
 import { isGitRepo, currentBranchFast, remoteUrlFast, defaultBranch, workingTreeStatus, branchSyncStatus } from './git.js';
 import { projectOverrides } from './config.js';
 import { findComposeFiles } from './compose.js';
+import { deploymentOf, workBranch, workingCopyPath } from './deployment.js';
 
 /** Parse YAML-ish frontmatter from an agent .md — we only need name/description. */
 export function parseAgentFile(file) {
@@ -87,6 +88,20 @@ async function mapLimit(items, limit, fn) {
 
 export async function describeProject(cfg, name, dir, { withStatus = true } = {}) {
   const ov = projectOverrides(cfg, name);
+  const dep = deploymentOf(cfg);
+  if (dep) {
+    // Jobs here never use the workspace checkout: describe what they do use.
+    const repo = dir;
+    const work = workingCopyPath(cfg, name);
+    let dirty = false;
+    if (withStatus && fs.existsSync(work)) try { dirty = (await workingTreeStatus(work, { timeoutMs: 15_000 })).dirty; } catch { dirty = null; }
+    return {
+      name, path: fs.existsSync(work) ? work : repo, vcs: 'git', current_branch: workBranch(cfg), default_branch: dep.push_branch, remote: remoteUrlFast(repo), dirty,
+      tracking_ref: `origin/${dep.push_branch}`, ahead: null, behind: null, diverged: null,
+      line: ov.line?.disabled ? `not available here: ${ov.line.disabled}` : ov.line?.worktree ? `${ov.line.worktree}${ov.line.branch ? ` (${ov.line.branch})` : ''}` : `origin/${dep.push_branch}`,
+      ...detectClaudeSetup(fs.existsSync(work) ? work : repo), compose: findComposeFiles(repo), overrides: Object.keys(ov).length ? ov : undefined,
+    };
+  }
   const setup = detectClaudeSetup(dir);
   const remote = remoteUrlFast(dir);
   let def = null;

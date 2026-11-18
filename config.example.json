@@ -1,65 +1,89 @@
 {
   "_comment": "Copy to config.json (or config.local.json for machine-local tweaks, which is gitignored and merged on top). Every key is optional; defaults live in src/config.js.",
-
   "workspace_root": "~/code",
   "data_dir": "~/.local/share/claude-code-bridge",
-
   "server": {
     "host": "0.0.0.0",
     "port": 4010,
     "token_file": "~/.config/claude-code-bridge/token"
   },
-
   "discovery": {
     "_comment": "depth 1 = direct children of workspace_root. Raise it if you nest by owner (~/code/<owner>/<repo>). Directory names in exclusions are skipped at any depth; names starting with '.' are always skipped.",
     "depth": 1,
-    "exclusions": ["node_modules", "claude-code-bridge", "archive"]
+    "exclusions": [
+      "node_modules",
+      "claude-code-bridge",
+      "archive"
+    ]
   },
-
   "limits": {
     "max_concurrent_jobs": 2,
     "job_timeout_minutes": 20,
     "max_cost_usd": 5,
     "list_jobs_max": 50
   },
-
   "clone": {
-    "_comment": "hosts: which git hosts list_available_repos / draft-PR creation talk to. Credentials come from `git credential fill` (your git credential helper) — never from this file. type: github | gitea | gitlab. api_base overrides the default API URL.",
+    "_comment": "hosts: which git hosts list_available_repos / draft-PR creation talk to. Credentials come from `git credential fill` (your git credential helper) \u2014 never from this file. type: github | gitea | gitlab. api_base overrides the default API URL.",
     "depth": 1,
     "timeout_seconds": 600,
     "max_size_mb": 2048,
     "hosts": [
-      { "host": "github.com", "type": "github" },
-      { "host": "git.example.com", "type": "gitea" },
-      { "host": "gitlab.example.com", "type": "gitlab", "api_base": "https://gitlab.example.com/api/v4" }
+      {
+        "host": "github.com",
+        "type": "github"
+      },
+      {
+        "host": "git.example.com",
+        "type": "gitea"
+      },
+      {
+        "host": "gitlab.example.com",
+        "type": "gitlab",
+        "api_base": "https://gitlab.example.com/api/v4"
+      }
     ]
   },
-
   "claude": {
     "_comment": "bin: claude executable (PATH or absolute). extra_args: appended verbatim to every invocation. Model choice lives under models.",
     "bin": "claude",
-    "extra_args": ["--effort", "high"],
+    "extra_args": [
+      "--effort",
+      "high"
+    ],
     "branch_prefix": "bridge/",
     "commit_author": "Claude Code Bridge <claude-code-bridge@localhost>"
   },
-
   "models": {
-    "_comment": "Tier names are policy; model ids must be ones the installed Claude Code accepts (confirmed for 2.1.240: claude-opus-5, claude-fable-5). An unavailable model fails the job loudly — no fallback. Escalation triggers are crude on purpose and expected to be tuned.",
+    "_comment": "Tier names are policy; model ids must be ones the installed Claude Code accepts (confirmed for 2.1.240: claude-opus-5, claude-fable-5). An unavailable model fails the job loudly \u2014 no fallback. Escalation triggers are crude on purpose and expected to be tuned.",
     "default_tier": "default",
     "complex_tier": "complex",
     "tiers": {
-      "default": { "model": "claude-opus-5", "max_cost_usd": 5, "aliases": ["opus"] },
-      "complex": { "model": "claude-fable-5", "max_cost_usd": 12, "aliases": ["fable"] }
+      "default": {
+        "model": "claude-opus-5",
+        "max_cost_usd": 5,
+        "aliases": [
+          "opus"
+        ]
+      },
+      "complex": {
+        "model": "claude-fable-5",
+        "max_cost_usd": 12,
+        "aliases": [
+          "fable"
+        ]
+      }
     },
     "escalation": {
-      "complex_agents": ["system-architect", "product-intent-guardian"],
+      "complex_agents": [
+        "system-architect",
+        "product-intent-guardian"
+      ],
       "prompt_length_chars": 2500,
       "file_references": 6,
       "plan_without_claude_setup": true,
       "retry_after_failure": true
     }
   },
-
   "experiments": {
     "_comment": "start_experiment: a loop that measures each change and keeps only improvements. They queue apart from ordinary jobs. attempt_cost_share caps one attempt at that share of the experiment's cost ceiling; max_cost_usd null uses the model tier's ceiling.",
     "max_concurrent": 1,
@@ -77,12 +101,16 @@
   },
   "compose": {
     "_comment": "protected: project directory names OR compose project names the bridge refuses to restart/stop/up/redeploy (status/logs still work). Keep the stack serving the chat UI and any other MCP servers here. Remove an entry to opt out.",
-    "protected": ["openui", "form-submissions", "dms-v3-form-submissions", "claude-code-bridge"],
+    "protected": [
+      "openui",
+      "form-submissions",
+      "dms-v3-form-submissions",
+      "claude-code-bridge"
+    ],
     "redeploy_timeout_minutes": 15,
     "restart_timeout_seconds": 180,
     "logs_default_lines": 200
   },
-
   "projects": {
     "_comment": "Per-project overrides keyed by directory name. default_branch: use when it can't be inferred. allow_untracked: don't count untracked files as a dirty tree. tier: default model tier for this project (escalation can still raise it).",
     "my-app": {
@@ -92,5 +120,26 @@
       "allow_untracked": true,
       "tier": "complex"
     }
+  },
+  "_deployment_comment": "Optional. With a deployment block, jobs work in the bridge's own worktree of each project (<workspace_root>/<worktree_dir>/<project>, on work_branch), start from the project's line (projects.<name>.line.worktree = the worktree other sessions work in; without one: origin/<push_branch>, else base_ref), are merged into the line fast-forward and pushed to push_branch only. execution_branch is then ignored. See README 'Deployment profile'.",
+  "deployment_example": {
+    "name": "my copy",
+    "site": "copy.example",
+    "push_branch": "feature/my-copy",
+    "work_branch": "bridge/my-copy-line",
+    "worktree_dir": ".bridge-lines",
+    "base_ref": "origin/testing/passkeys",
+    "forbidden_push_branches": [
+      "testing/passkeys",
+      "main",
+      "master"
+    ],
+    "forbidden_commands": [
+      "/srv/bridge-deploy/deploy.sh"
+    ],
+    "link_node_modules": true,
+    "rules": [
+      "Extra sentences for the agent's system prompt."
+    ]
   }
 }

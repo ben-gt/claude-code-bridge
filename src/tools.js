@@ -4,6 +4,7 @@ import { scrub, scrubDeep } from './scrub.js';
 import { cloneProject, listAvailableRepos } from './clone.js';
 import { resolveComposeTarget, composeStatus, composeLogs, compose, validateServices, composeConfig, isProtected, protectedList } from './compose.js';
 import { experimentOptions } from './experiments.js';
+import { deploymentOf, deploymentSummary } from './deployment.js';
 
 function ok(data, text) {
   const payload = scrubDeep(data);
@@ -23,6 +24,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
   const origRegister = server.registerTool.bind(server);
   server.registerTool = (name, config, handler) => origRegister(name, config, async (args, extra) => {
     if (cfg.execution_branch && ['compose_redeploy','compose_restart','compose_stop','compose_up'].includes(name)) return fail(new Error('Demo deployment requires the shared build lock and current release configuration; use the demo deployment workflow.'));
+    if (deploymentOf(cfg) && ['start_experiment', 'apply_experiment', 'clone_project'].includes(name)) return fail(new Error(`${name} is not available on this deployment (${deploymentOf(cfg).name || 'profile'}): jobs here work on each project's line and publish to ${deploymentOf(cfg).push_branch} only. Use start_task.`));
     const t0 = Date.now();
     const r = await handler(args, extra);
     const msg = `tool ${name} ${r?.isError ? 'error' : 'ok'} ${Date.now() - t0}ms${r?.isError ? `: ${String(r.content?.[0]?.text || '').slice(0, 200)}` : ''}`;
@@ -47,10 +49,10 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
         has_claude_setup: p.has_claude_setup, claude_md: p.claude_md || undefined, preflight: p.preflight || undefined,
         agents: p.agents.length ? p.agents.map(a => a.name) : undefined,
         compose: p.compose.length ? p.compose.map(c => c.file) : undefined,
-        overrides: p.overrides,
+        line: p.line, overrides: p.overrides,
       }));
     }
-    return ok({ workspace_root: cfg.workspace_root, count: out.length, projects: out, note: verbose ? undefined : 'compact view; pass verbose=true for paths, agent descriptions and compose detail' });
+    return ok({ workspace_root: cfg.workspace_root, deployment: deploymentSummary(cfg), count: out.length, projects: out, note: verbose ? undefined : 'compact view; pass verbose=true for paths, agent descriptions and compose detail' });
   }));
 
   server.registerTool('clone_project', {
@@ -102,7 +104,7 @@ export function registerTools(server, { cfg, projects, jobs, log }) {
     },
   }, wrap(async args => {
     const r = await jobs.start(args);
-    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.deploys_when_done ? '; deploys to the demo when done' : ''}).${r.waiting_for ? ` Queued behind ${r.waiting_for}; it starts by itself.` : ''} Poll get_task_status with this job_id.`);
+    return ok(r, `job ${r.job_id} ${r.state} (${r.mode} mode on ${r.project}, model ${r.model} — ${r.model_reason}${r.deploys_when_done ? `; deploys to ${deploymentOf(cfg)?.site || 'the demo'} when done` : ''}).${deploymentOf(cfg) ? ` ${r.note}` : ''}${r.waiting_for ? ` Queued behind ${r.waiting_for}; it starts by itself.` : ''} Poll get_task_status with this job_id.`);
   }, 'start_task'));
 
   server.registerTool('continue_task', {

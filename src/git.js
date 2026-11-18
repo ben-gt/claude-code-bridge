@@ -25,8 +25,15 @@ export class GitError extends Error {
   }
 }
 
+// Every push the bridge itself makes passes this check (set once at start-up by a deployment profile).
+let pushGuard = null;
+export function setPushGuard(fn) { pushGuard = fn; }
+
 /** Run a command, capture output, enforce a timeout. stdout/stderr are scrubbed. */
 export function run(cmd, args, { cwd, timeoutMs = 30_000, env = {}, input, scrubOutput = true } = {}) {
+  if (pushGuard && cmd === 'git' && args.includes('push')) {
+    try { pushGuard(args); } catch (e) { return Promise.reject(e); }
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd,
